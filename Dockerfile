@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # 使用 Alpine 作为基础镜像
 FROM alpine:latest
 
@@ -20,18 +18,44 @@ WORKDIR $HOME/app
 # 将所有可执行文件复制到容器内
 COPY --chown=user . .
 
-# --- 关键部分：动态查找并准备可执行文件 ---
-# 根据 TARGETOS 和 TARGETARCH 环境变量，找到匹配的文件名
-# 例如，在构建 linux/amd64 时，$TARGETPLATFORM = "linux/amd64"
-# 我们用 sed 将 "linux/amd64" 转换成 "linux-amd64-x64" 的格式
-RUN \
-    # 构建目标文件名
-    target_file=$(ls erp-${TARGETOS}-${TARGETARCH}* | head -n 1) && \
-    echo "Selected file for ${TARGETPLATFORM}: $target_file" && \
-    # 将其重命名为一个通用名称，方便 CMD 执行
-    mv "$target_file" erp-binary && \
-    # 赋予可执行权限
-    chmod +x erp-binary
+# --- 改进的关键部分：动态查找并准备可执行文件 ---
+# 该脚本会根据 $TARGETPLATFORM 变量智能匹配正确的文件
+RUN <<EOF
+#!/bin/sh
+set -e
+
+echo "Building for platform: $TARGETPLATFORM"
+
+# 根据 TARGETPLATFORM 映射到实际的文件名
+case "$TARGETPLATFORM" in
+  "linux/amd64")
+    FILE_PATTERN="erp-linux-amd64-x64"
+    ;;
+  "linux/arm64"|"linux/aarch64")
+    FILE_PATTERN="erp-linux-arm64-arm64"
+    ;;
+  *)
+    echo "Unsupported platform: $TARGETPLATFORM"
+    ls -la # 列出当前目录文件，方便调试
+    exit 1
+    ;;
+esac
+
+# 检查文件是否存在
+if [ ! -f "$FILE_PATTERN" ]; then
+  echo "Error: Could not find binary matching pattern: $FILE_PATTERN"
+  ls -la # 列出当前目录文件，方便调试
+  exit 1
+fi
+
+echo "Found binary: $FILE_PATTERN, copying to erp-binary"
+
+# 将匹配的文件复制为通用名称
+cp "$FILE_PATTERN" erp-binary
+chmod +x erp-binary
+
+echo "Successfully prepared erp-binary for $TARGETPLATFORM"
+EOF
 
 # 声明服务端口
 EXPOSE 8080
