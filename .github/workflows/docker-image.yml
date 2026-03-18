@@ -31,26 +31,8 @@ case "$TARGETPLATFORM" in
   "linux/amd64")
     FILE_PATTERN="erp-linux-amd64-x64"
     ;;
-  "linux/386")
-    FILE_PATTERN="erp-linux-386-x86"
-    ;;
-  "linux/arm/v5")
-    FILE_PATTERN="erp-linux-arm-v5"
-    ;;
-  "linux/arm/v6")
-    FILE_PATTERN="erp-linux-arm-v6"
-    ;;
-  "linux/arm/v7")
-    FILE_PATTERN="erp-linux-arm-v7"
-    ;;
   "linux/arm64"|"linux/aarch64")
     FILE_PATTERN="erp-linux-arm64-arm64"
-    ;;
-  "windows/amd64")
-    FILE_PATTERN="erp-windows-amd64-x64.exe"
-    ;;
-  "windows/386")
-    FILE_PATTERN="erp-windows-386-x86.exe"
     ;;
   *)
     echo "Unsupported platform: $TARGETPLATFORM"
