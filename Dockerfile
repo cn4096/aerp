@@ -1,9 +1,9 @@
+# syntax=docker/dockerfile:1
+
 # 使用 Alpine 作为基础镜像
 FROM alpine:latest
 
 # 安装必要的运行时依赖
-# ca-certificates: 用于验证 SSL 证书
-# libc6-compat: 提供一些兼容性库，对某些应用（尤其是 Go 应用）可能是必要的
 RUN apk add --no-cache \
     ca-certificates \
     libc6-compat \
@@ -17,14 +17,24 @@ USER user
 ENV HOME=/home/user
 WORKDIR $HOME/app
 
-# 复制文件到容器内，并自动赋予非 root 用户权限
-COPY --chown=user . $HOME/app
+# 将所有可执行文件复制到容器内
+COPY --chown=user . .
 
-# 赋予二进制文件可执行权限
-RUN chmod +x $HOME/app/erp-linux-amd64-x64
+# --- 关键部分：动态查找并准备可执行文件 ---
+# 根据 TARGETOS 和 TARGETARCH 环境变量，找到匹配的文件名
+# 例如，在构建 linux/amd64 时，$TARGETPLATFORM = "linux/amd64"
+# 我们用 sed 将 "linux/amd64" 转换成 "linux-amd64-x64" 的格式
+RUN \
+    # 构建目标文件名
+    target_file=$(ls erp-${TARGETOS}-${TARGETARCH}* | head -n 1) && \
+    echo "Selected file for ${TARGETPLATFORM}: $target_file" && \
+    # 将其重命名为一个通用名称，方便 CMD 执行
+    mv "$target_file" erp-binary && \
+    # 赋予可执行权限
+    chmod +x erp-binary
 
 # 声明服务端口
 EXPOSE 8080
 
-# 启动命令
-CMD ["./erp-linux-amd64-x64"]
+# 启动命令，统一指向重命名后的文件
+CMD ["./erp-binary"]
