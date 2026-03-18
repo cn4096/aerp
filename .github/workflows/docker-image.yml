@@ -1,48 +1,84 @@
-name: Build and Push Docker Image
+# syntax=docker/dockerfile:1
 
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'Dockerfile'
-      - 'erp-linux-amd64-x64'
-      - 'erp-linux-arm64-arm64'
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+# 使用 Alpine 作为基础镜像
+FROM alpine:latest
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+# 安装必要的运行时依赖
+RUN apk add --no-cache \
+    ca-certificates \
+    libc6-compat \
+    && rm -rf /var/cache/apk/*
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+# 创建非 root 用户
+RUN adduser -D -u 1000 user
+USER user
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+# 设置工作目录
+ENV HOME=/home/user
+WORKDIR $HOME/app
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+# 将所有可执行文件复制到容器内
+COPY --chown=user . .
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/aerp:latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=aerp Server
-            org.opencontainers.image.licenses=MIT
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+# --- 改进的关键部分：动态查找并准备可执行文件 ---
+# 该脚本会根据 $TARGETPLATFORM 变量智能匹配正确的文件
+RUN <<EOF
+#!/bin/sh
+set -e
+
+echo "Building for platform: $TARGETPLATFORM"
+
+# 根据 TARGETPLATFORM 映射到实际的文件名
+case "$TARGETPLATFORM" in
+  "linux/amd64")
+    FILE_PATTERN="erp-linux-amd64-x64"
+    ;;
+  "linux/386")
+    FILE_PATTERN="erp-linux-386-x86"
+    ;;
+  "linux/arm/v5")
+    FILE_PATTERN="erp-linux-arm-v5"
+    ;;
+  "linux/arm/v6")
+    FILE_PATTERN="erp-linux-arm-v6"
+    ;;
+  "linux/arm/v7")
+    FILE_PATTERN="erp-linux-arm-v7"
+    ;;
+  "linux/arm64"|"linux/aarch64")
+    FILE_PATTERN="erp-linux-arm64-arm64"
+    ;;
+  "windows/amd64")
+    FILE_PATTERN="erp-windows-amd64-x64.exe"
+    ;;
+  "windows/386")
+    FILE_PATTERN="erp-windows-386-x86.exe"
+    ;;
+  *)
+    echo "Unsupported platform: $TARGETPLATFORM"
+    ls -la # 列出当前目录文件，方便调试
+    exit 1
+    ;;
+esac
+
+# 检查文件是否存在
+if [ ! -f "$FILE_PATTERN" ]; then
+  echo "Error: Could not find binary matching pattern: $FILE_PATTERN"
+  ls -la # 列出当前目录文件，方便调试
+  exit 1
+fi
+
+echo "Found binary: $FILE_PATTERN, copying to erp-binary"
+
+# 将匹配的文件复制为通用名称
+cp "$FILE_PATTERN" erp-binary
+chmod +x erp-binary
+
+echo "Successfully prepared erp-binary for $TARGETPLATFORM"
+EOF
+
+# 声明服务端口
+EXPOSE 8080
+
+# 启动命令，统一指向重命名后的文件
+CMD ["./erp-binary"]
