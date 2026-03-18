@@ -15,16 +15,22 @@ USER user
 ENV HOME=/home/user
 WORKDIR $HOME/app
 
+# ✅ 关键修复：必须在 FROM 之后显式声明这些变量，RUN 步骤才能读到值
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
 # 将所有可执行文件复制到容器内
 COPY --chown=user . .
 
-# --- 改进的关键部分：动态查找并准备可执行文件 ---
-# 该脚本会根据 $TARGETPLATFORM 变量智能匹配正确的文件
+# 动态查找并准备可执行文件
 RUN <<EOF
 #!/bin/sh
 set -e
 
 echo "Building for platform: $TARGETPLATFORM"
+echo "=== 当前目录文件 ==="
+ls -la
 
 # 根据 TARGETPLATFORM 映射到实际的文件名
 case "$TARGETPLATFORM" in
@@ -32,33 +38,28 @@ case "$TARGETPLATFORM" in
     FILE_PATTERN="erp-linux-amd64-x64"
     ;;
   "linux/arm64"|"linux/aarch64")
-    FILE_PATTERN="erp-linux-arm64-arm64"
+    FILE_PATTERN="erp-linux-arm64-arm64"  # ⚠️ 请确认你的实际文件名
     ;;
   *)
     echo "Unsupported platform: $TARGETPLATFORM"
-    ls -la # 列出当前目录文件，方便调试
     exit 1
     ;;
 esac
 
 # 检查文件是否存在
 if [ ! -f "$FILE_PATTERN" ]; then
-  echo "Error: Could not find binary matching pattern: $FILE_PATTERN"
-  ls -la # 列出当前目录文件，方便调试
+  echo "Error: Could not find binary: $FILE_PATTERN"
   exit 1
 fi
 
-echo "Found binary: $FILE_PATTERN, copying to erp-binary"
-
-# 将匹配的文件复制为通用名称
+echo "Found binary: $FILE_PATTERN"
 cp "$FILE_PATTERN" erp-binary
 chmod +x erp-binary
-
 echo "Successfully prepared erp-binary for $TARGETPLATFORM"
 EOF
 
 # 声明服务端口
 EXPOSE 8080
 
-# 启动命令，统一指向重命名后的文件
+# 启动命令
 CMD ["./erp-binary"]
