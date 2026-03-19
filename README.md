@@ -5,9 +5,10 @@
 + 数据保存到本地并运行：
   
 ```
-  ## 数据保存在当前目录/erp_data 访问端口:8880
+ ## 删除旧的容器，更新镜像
  docker stop my-erp-app ; docker rm my-erp-app
  docker pull ghcr.io/cn4096/aerp:latest
+ ## 数据保存在当前目录/erp_data 访问端口:8880
  docker run -itd \
   --name my-erp-app \
   -p 8880:8080 \
