@@ -531,6 +531,7 @@ const state = {
   loading: false,
   chatUnread: 0,
   siteSettings: JSON.parse(localStorage.getItem('erp_site_settings') || 'null'),
+  featureFlags: JSON.parse(localStorage.getItem('erp_feature_flags') || 'null'),
 };
 
 // ============================================================
@@ -763,18 +764,37 @@ function renderSidebar() {
     { id: 'templates', icon: '📄', label: '合同模板', adminOnly: true },
     { id: 'sysadmin',  icon: '⚙️', label: '系统设置', adminOnly: true },
   ];
+  // feature_flags 过滤：null/空对象 = 全开；有值时按 id 查 bool
+  const ff = state.featureFlags || {};
+  const ffEnabled = id => Object.keys(ff).length === 0 || ff[id] !== false;
+
   const logoTitle = (state.siteSettings && state.siteSettings.logo_title) || '智云 ERP';
   const logoSub   = (state.siteSettings && state.siteSettings.logo_sub)   || 'v1.0 · Enterprise';
   let html = `<div id="sidebar"><div id="sidebar-resize-handle"></div><div class="logo" style="display:flex;align-items:center;justify-content:space-between">
     <div><div class="logo-title">${escHtml(logoTitle)}</div><div class="logo-sub">${escHtml(logoSub)}</div></div>
     <button onclick="closeSidebar()" id="sidebar-close-btn" style="background:none;border:none;color:var(--text3);font-size:22px;cursor:pointer;padding:0 4px;line-height:1">×</button>
   </div><nav>`;
-  for (const item of nav) {
+  // 前瞻：判断某 section 之后是否至少有一个可见 item
+  const sectionHasVisible = (startIdx) => {
+    for (let i = startIdx + 1; i < nav.length; i++) {
+      if (nav[i].section) break; // 遇到下一个分组就停
+      const it = nav[i];
+      if (it.adminOnly && !u.is_admin && !hasPermission('users')) continue;
+      if (it.id && !ffEnabled(it.id)) continue;
+      return true; // 找到至少一个可见 item
+    }
+    return false;
+  };
+
+  for (let ni = 0; ni < nav.length; ni++) {
+    const item = nav[ni];
     if (item.section) {
+      if (!sectionHasVisible(ni)) continue; // 整组都不可见，跳过标题
       html += `<div class="nav-section">${item.section}</div>`;
       continue;
     }
     if (item.adminOnly && !u.is_admin && !hasPermission('users')) continue;
+    if (item.id && !ffEnabled(item.id)) continue;
     const active = state.page === item.id ? 'active' : '';
     const badge = item.id==='chat' && state.chatUnread>0
       ? `<span style="background:var(--red);color:#fff;font-size:10px;border-radius:10px;padding:1px 6px;margin-left:auto">${state.chatUnread>99?'99+':state.chatUnread}</span>` : '';
@@ -954,8 +974,13 @@ async function loadSiteSettings() {
     }
     state.siteSettings = Object.assign({}, pub, full);
     try { localStorage.setItem('erp_site_settings', JSON.stringify(state.siteSettings)); } catch(e) {}
+    // 解析 feature_flags
+    const rawFlags = state.siteSettings.feature_flags || '';
+    state.featureFlags = rawFlags ? JSON.parse(rawFlags) : null;
+    try { localStorage.setItem('erp_feature_flags', JSON.stringify(state.featureFlags)); } catch(e) {}
   } catch(e) {
     state.siteSettings = JSON.parse(localStorage.getItem('erp_site_settings') || 'null') || {};
+    state.featureFlags = JSON.parse(localStorage.getItem('erp_feature_flags') || 'null');
   }
 }
 
@@ -6338,6 +6363,7 @@ let _dcPage        = 1;
 let _dcTotal       = 0;
 let _dcSortBy      = 'id';
 let _dcSortDir     = 'asc';
+let _dcEditingRid  = null;    // 当前编辑行的id（null=新增/复制）
 const _DC_LAST_KEY = 'erp_last_dc_table';
 
 // ── 入口 ─────────────────────────────────────────────────────
@@ -6499,10 +6525,15 @@ function dcRenderTable() {
     return _dcSortDir === 'asc' ? ' <span style="color:var(--accent);font-size:11px">↑</span>' : ' <span style="color:var(--accent);font-size:11px">↓</span>';
   };
 
+  const thAct = 'padding:10px 8px;text-align:center;font-size:12px;font-weight:600;color:var(--text3);white-space:nowrap;border-bottom:1px solid var(--border);width:84px';
+  const tdAct = 'padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle;text-align:center;white-space:nowrap;width:84px';
+  const iconBtn = (tip, ico, fn, danger) =>
+    `<button title="${tip}" onclick="${fn}" style="background:none;border:none;cursor:pointer;font-size:15px;padding:2px 5px;opacity:.7;border-radius:4px;line-height:1;${danger?'color:var(--red)':''}" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.7'">${ico}</button>`;
+
   const thead = `<tr>
     <th style="${thStyle}" onclick="dcSetSort('id')">#${arrow('id')}</th>
     ${fields.map(f=>`<th style="${thStyle}" onclick="dcSetSort('${f.id}')">${escHtml(f.name)}${arrow(f.id)}</th>`).join('')}
-    <th style="${thStyle}">操作</th>
+    <th style="${thAct}">操作</th>
   </tr>`;
 
   const tbody = _dcRows.map(row => `
@@ -6512,9 +6543,8 @@ function dcRenderTable() {
         const v = row[f.id] ?? '';
         return `<td style="${tdStyle}" title="${escHtml(String(v))}">${escHtml(String(v))}</td>`;
       }).join('')}
-      <td style="${tdStyle}">
-        <button class="btn btn-sm" onclick="dcEditRow(${row.id})">编辑</button>
-        <button class="btn btn-sm btn-danger" onclick="dcDeleteRow(${row.id})" style="margin-left:4px">删除</button>
+      <td style="${tdAct}">
+        ${iconBtn('复制', '📋', `dcCopyRow(${row.id})`, false)}${iconBtn('编辑', '✏️', `dcEditRow(${row.id})`, false)}${iconBtn('删除', '🗑️', `dcDeleteRow(${row.id})`, true)}
       </td>
     </tr>`).join('');
 
@@ -6554,35 +6584,110 @@ async function dcEditRow(rid) {
   if (row) dcOpenRowModal(row);
 }
 
-function dcOpenRowModal(row) {
+function dcOpenRowModal(row, titleOverride) {
   if (!_dcActiveTable) return;
   const fields = (_dcActiveTable.fields || []).filter(f => !f.hidden);
-  const isEdit = !!row;
+  // titleOverride 说明是复制模式，保存走新增；否则有row就是编辑
+  const isCopy = !!titleOverride;
+  _dcEditingRid = (row && !isCopy) ? row.id : null;
 
   const formRows = fields.map(f => {
     const val = row ? (row[f.id] ?? '') : '';
-    const inputType = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text';
+    const isDate = f.type === 'date';
+    const inputType = f.type === 'number' ? 'number' : 'text';
+    // 日期字段：检测原值格式（仅日期 or 日期+时间）
+    const hasTime = isDate && /\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}/.test(String(val));
+    const dateFmt = isDate ? (hasTime ? 'datetime' : 'date') : '';
+    // 时间按钮：日期类型字段旁边显示"⏱ 当前时间"按钮
+    const nowBtn = isDate
+      ? `<button type="button" onclick="dcFillNow('dc-field-${f.id}','${dateFmt}')"
+           style="flex-shrink:0;padding:6px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text2);font-size:12px;cursor:pointer;white-space:nowrap"
+           title="填入当前系统时间">⏱ 当前时间</button>`
+      : '';
+    const placeholder = isDate
+      ? (hasTime ? '如 2026-03-19 14:30:00' : '如 2026-03-19')
+      : escHtml(f.name);
+    const inputWrap = isDate
+      ? `<div style="display:flex;gap:6px;align-items:center">
+           <input id="dc-field-${f.id}" type="text" value="${escHtml(String(val))}"
+             placeholder="${placeholder}"
+             oninput="dcDateFilter(this)"
+             style="flex:1;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+           ${nowBtn}
+         </div>`
+      : `<input id="dc-field-${f.id}" type="${inputType}" value="${escHtml(String(val))}"
+           placeholder="${escHtml(f.name)}"
+           style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">`;
     return `<div class="form-group">
       <label>${escHtml(f.name)}${f.required?'<span style="color:var(--red)"> *</span>':''}</label>
-      <input id="dc-field-${f.id}" type="${inputType}" value="${escHtml(String(val))}"
-        placeholder="${escHtml(f.name)}"
-        style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+      ${inputWrap}
     </div>`;
   }).join('');
 
-  showModal(`
+  const modalTitle = titleOverride || (_dcEditingRid ? '编辑记录' : '新增记录');
+  dcShowModal(`
   <div class="modal">
-    <div class="modal-header">${isEdit?'编辑记录':'新增记录'}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-header">${modalTitle}<span class="modal-close" onclick="dcCloseModal()">×</span></div>
     <div class="modal-body">${formRows}</div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn btn-primary" onclick="dcSaveRow(${row?.id||'null'})">保存</button>
+      <button class="btn" onclick="dcCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcSaveRow()">保存</button>
     </div>
   </div>`);
-  document.getElementById('modal-close').onclick = closeModal;
 }
 
-async function dcSaveRow(rid) {
+// 数据中心专用弹窗：直接操作 DOM，完全绕开 render()/loadPage()
+// 这样排序、分页、搜索等所有状态变量全程不被重置
+function dcShowModal(html) {
+  dcCloseModal(); // 先清掉旧的（防重叠）
+  const overlay = document.createElement('div');
+  overlay.id = 'dc-modal-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+}
+
+function dcCloseModal() {
+  const overlay = document.getElementById('dc-modal-overlay');
+  if (overlay) overlay.remove();
+}
+
+// 日期输入过滤：只允许数字、- / : 空格，其余字符实时剔除
+function dcDateFilter(el) {
+  const pos = el.selectionStart;
+  const before = el.value;
+  const after = before.replace(/[^0-9\-\/: ]/g, '');
+  if (after !== before) {
+    el.value = after;
+    // 尽量还原光标位置
+    el.setSelectionRange(Math.max(0, pos - 1), Math.max(0, pos - 1));
+  }
+}
+
+// 填入当前系统时间，按 fmt 决定格式：'datetime' = 日期+时间，其余 = 仅日期
+function dcFillNow(fieldId, fmt) {
+  const el = document.getElementById(fieldId);
+  if (!el) return;
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  // 若字段当前已有值，按其格式决定；否则按 fmt 参数决定
+  const cur = el.value.trim();
+  const curHasTime = /\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}/.test(cur);
+  const useDateTime = cur ? curHasTime : (fmt === 'datetime');
+  el.value = useDateTime ? `${dateStr} ${timeStr}` : dateStr;
+}
+
+// 复制行：把当前行数据填入新增弹窗
+function dcCopyRow(rid) {
+  const row = _dcRows.find(r => r.id === rid);
+  if (!row) return;
+  // 传入row数据但标题显示"复制记录"，保存时以rid=null走新增逻辑
+  dcOpenRowModal(row, '复制记录');
+}
+
+async function dcSaveRow() {
   if (!_dcActiveTable) return;
   const fields = (_dcActiveTable.fields || []).filter(f => !f.hidden);
   const body = {};
@@ -6594,11 +6699,26 @@ async function dcSaveRow(rid) {
     body[f.id] = f.type === 'number' ? (parseFloat(v)||0) : v;
   }
   try {
-    if (rid) await api('PUT', `/dc/tables/${_dcActiveTable.id}/rows/${rid}`, body);
-    else     await api('POST', `/dc/tables/${_dcActiveTable.id}/rows`, body);
-    closeModal();
-    await dcLoadRows();
+    if (_dcEditingRid) await api('PUT', `/dc/tables/${_dcActiveTable.id}/rows/${_dcEditingRid}`, body);
+    else               await api('POST', `/dc/tables/${_dcActiveTable.id}/rows`, body);
+    // 先关弹窗，用户立刻看到列表；后台静默拉新数据，到位后无感更新
+    dcCloseModal();
+    dcLoadRowsSilent();
   } catch(e) { alert('保存失败: ' + e.message); }
+}
+
+// 无感刷新：后台拉数据，完成后再渲染，不影响用户当前视图
+async function dcLoadRowsSilent() {
+  if (!_dcActiveTable) return;
+  const q = document.getElementById('dc-search')?.value || '';
+  try {
+    const res = await api('GET', `/dc/tables/${_dcActiveTable.id}/rows?q=${encodeURIComponent(q)}&page=${_dcPage}&sort_by=${_dcSortBy}&order=${_dcSortDir}`);
+    _dcRows  = res.data  || [];
+    _dcTotal = res.total || 0;
+    if (res.fields) _dcActiveTable.fields = res.fields;
+    dcRenderTable();
+    dcRenderPagination();
+  } catch { /* 静默失败，不打扰用户 */ }
 }
 
 async function dcDeleteRow(rid) {
@@ -7409,6 +7529,9 @@ async function loadSysAdmin(content, actions) {
       <button id="sa-tab-settings" onclick="saSwitchTab('settings')"
         style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
                font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">⚙️ 系统设置</button>
+      <button id="sa-tab-features" onclick="saSwitchTab('features')"
+        style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
+               font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">🔧 功能配置</button>
     </div>
 
     <!-- 系统信息面板 -->
@@ -7431,13 +7554,20 @@ async function loadSysAdmin(content, actions) {
         <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
       </div>
     </div>
+
+    <!-- 功能配置面板 -->
+    <div id="sa-panel-features" style="display:none">
+      <div id="sa-features-body">
+        <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
+      </div>
+    </div>
   </div>`;
 
   saLoadSysInfo();
 }
 
 function saSwitchTab(tab) {
-  ['info','company','settings'].forEach(t => {
+  ['info','company','settings','features'].forEach(t => {
     const btn   = document.getElementById(`sa-tab-${t}`);
     const panel = document.getElementById(`sa-panel-${t}`);
     const isActive = t === tab;
@@ -7451,6 +7581,7 @@ function saSwitchTab(tab) {
   if (tab === 'info')     saLoadSysInfo();
   if (tab === 'company')  saLoadCompany();
   if (tab === 'settings') saLoadSettings();
+  if (tab === 'features') saLoadFeatures();
 }
 
 // ── 系统信息 ─────────────────────────────────────────────────
@@ -7611,6 +7742,130 @@ async function saLoadSettings() {
   } catch(e) {
     if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
   }
+}
+
+// ── 功能配置 ─────────────────────────────────────────────────
+async function saLoadFeatures() {
+  const body = document.getElementById('sa-features-body');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>';
+  try {
+    const res = await api('GET', '/admin/settings');
+    const rawFlags = (res.settings || {}).feature_flags || '';
+    const ff = rawFlags ? JSON.parse(rawFlags) : {};
+
+    // 所有可配置功能，按分组排列
+    const groups = [
+      { label: '可选', items: [
+        { id: 'dashboard',  icon: '📊', label: '仪表盘' },
+      ]},
+      { label: '通讯', items: [
+        { id: 'chat',       icon: '💬', label: '聊天' },
+        { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
+      ]},
+      { label: '业务', items: [
+        { id: 'products',   icon: '📦', label: '产品管理' },
+        { id: 'inventory',  icon: '🏭', label: '产品库存' },
+        { id: 'customers',  icon: '🏢', label: '客户管理' },
+        { id: 'quotations', icon: '📋', label: '报价系统' },
+        { id: 'contracts',  icon: '📝', label: '合同管理' },
+      ]},
+      { label: '财务', items: [
+        { id: 'finance',    icon: '💰', label: '财务管理' },
+        { id: 'bank',       icon: '🏦', label: '银行流水' },
+      ]},
+      { label: '分析', items: [
+        { id: 'reports',    icon: '📈', label: '报表中心' },
+        { id: 'datacenter', icon: '🗄️', label: '数据中心' },
+      ]},
+      { label: '系统', items: [
+        { id: 'templates',  icon: '📄', label: '合同模板' },
+      ]},
+    ];
+
+    const isOn = id => ff[id] !== false; // 默认全开
+
+    const toggleHtml = (id, on) => `
+      <div id="sa-ff-toggle-${id}" data-on="${on?'1':''}" data-id="${id}"
+        onclick="saFfToggle('${id}')"
+        style="position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0;cursor:pointer">
+        <span style="position:absolute;inset:0;border-radius:11px;transition:background .2s;
+                     background:${on?'var(--accent)':'var(--border)'}"></span>
+        <span style="position:absolute;top:3px;left:${on?'20px':'3px'};width:16px;height:16px;
+                     border-radius:50%;background:#fff;transition:left .2s;pointer-events:none"></span>
+      </div>`;
+
+    const groupHtml = groups.map(g => `
+      <div style="margin-bottom:6px">
+        <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;
+                    letter-spacing:.06em;padding:8px 0 4px">${g.label}</div>
+        ${g.items.map(item => `
+          <div style="display:flex;align-items:center;justify-content:space-between;
+                      padding:10px 16px;border-radius:8px;margin-bottom:4px;
+                      background:var(--bg3)">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:16px">${item.icon}</span>
+              <span style="font-size:13px;color:var(--text)">${item.label}</span>
+            </div>
+            ${toggleHtml(item.id, isOn(item.id))}
+          </div>`).join('')}
+      </div>`).join('');
+
+    body.innerHTML = `
+      <div class="card" style="max-width:680px;padding:0;overflow:hidden">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent)">🔧 功能配置</div>
+        <div style="padding:4px 20px 8px">
+          <div style="font-size:12px;color:var(--text3);padding:10px 0 6px">
+            关闭某功能后，该功能将从左侧菜单隐藏。重新开启后立即恢复。
+          </div>
+          ${groupHtml}
+        </div>
+        <div style="padding:10px 20px 16px;display:flex;justify-content:flex-end">
+          <button class="btn btn-primary btn-sm" id="sa-ff-save-btn" onclick="saFfSave(this)">💾 保存配置</button>
+        </div>
+      </div>`;
+
+    // 暂存当前 ff 对象供 toggle 操作
+    window._saFfCurrent = Object.assign({}, ff);
+  } catch(e) {
+    if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+function saFfToggle(id) {
+  if (!window._saFfCurrent) window._saFfCurrent = {};
+  const cur = window._saFfCurrent[id] !== false; // 当前是否开
+  const newVal = !cur;
+  window._saFfCurrent[id] = newVal;
+
+  const el = document.getElementById(`sa-ff-toggle-${id}`);
+  if (!el) return;
+  el.dataset.on = newVal ? '1' : '';
+  const spans = el.querySelectorAll('span');
+  if (spans[0]) spans[0].style.background = newVal ? 'var(--accent)' : 'var(--border)';
+  if (spans[1]) spans[1].style.left       = newVal ? '20px' : '3px';
+}
+
+async function saFfSave(btn) {
+  const ff = window._saFfCurrent || {};
+  try {
+    await api('PUT', '/admin/settings', { feature_flags: JSON.stringify(ff) });
+    // 更新本地状态，立即刷新侧边栏
+    state.featureFlags = ff;
+    try { localStorage.setItem('erp_feature_flags', JSON.stringify(ff)); } catch(e) {}
+    // 重新渲染侧边栏（只改 nav 区域，不重置页面内容）
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.outerHTML = renderSidebar();
+    // 重新绑定侧边栏事件
+    document.querySelectorAll('.nav-item[data-page]').forEach(el => {
+      el.addEventListener('click', () => { state.page = el.dataset.page; render(); loadPage(); });
+    });
+    const orig = btn.textContent;
+    btn.textContent = '✓ 已保存';
+    btn.disabled = true;
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+  } catch(e) { alert('保存失败：' + e.message); }
 }
 
 // 企业信息独立加载函数
@@ -9372,23 +9627,106 @@ function sfRenderBreadcrumb(crumbs) {
 
 // ── 上传 ──────────────────────────────────────────────────────────────────
 function sfTriggerUpload() { document.getElementById('sf-file-input')?.click(); }
-async function sfDoUpload(input) {
-  const files = input.files;
-  if (!files || !files.length) return;
-  let ok = 0;
-  for (const file of files) {
-    const fd = new FormData();
-    fd.append('file', file);
-    try {
-      const r = await fetch(`/api/share/dirs/${_sf.dirID}/upload`, {
-        method:'POST', headers:{ Authorization:'Bearer '+state.token }, body:fd });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error||'上传失败');
-      ok++;
-    } catch(e) { sfToast('上传失败: '+e.message,'error'); }
+
+// 创建/更新进度弹窗；返回控制句柄
+function sfProgressModal(total) {
+  // 若已有弹窗则复用
+  let overlay = document.getElementById('sf-progress-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'sf-progress-overlay';
+    overlay.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,.45);
+      display:flex;align-items:center;justify-content:center;z-index:10000`;
+    overlay.innerHTML = `
+      <div id="sf-progress-box" style="background:var(--bg2);border-radius:12px;
+        padding:28px 32px;min-width:320px;max-width:480px;width:90%;
+        box-shadow:0 8px 32px rgba(0,0,0,.4)">
+        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:16px" id="sf-prog-title">正在上传...</div>
+        <div style="background:var(--bg3);border-radius:6px;height:10px;overflow:hidden;margin-bottom:10px">
+          <div id="sf-prog-bar" style="height:100%;width:0%;background:var(--accent);transition:width .2s;border-radius:6px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text3)">
+          <span id="sf-prog-file">-</span>
+          <span id="sf-prog-pct">0%</span>
+        </div>
+        <div style="margin-top:16px;text-align:right">
+          <button onclick="sfProgressClose(true)" style="padding:6px 16px;background:var(--bg3);border:1px solid var(--border);
+            border-radius:6px;color:var(--text2);font-size:13px;cursor:pointer">关闭</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
   }
+  window._sfProgAutoClose = null;
+
+  return {
+    // 更新单文件进度（0-100）
+    setFile(name, pct, idx) {
+      const title = document.getElementById('sf-prog-title');
+      const bar   = document.getElementById('sf-prog-bar');
+      const file  = document.getElementById('sf-prog-file');
+      const pctEl = document.getElementById('sf-prog-pct');
+      if (title) title.textContent = `正在上传 ${idx}/${total}：${name}`;
+      if (bar)   bar.style.width = pct + '%';
+      if (file)  file.textContent = name;
+      if (pctEl) pctEl.textContent = pct + '%';
+    },
+    // 全部完成
+    done(ok, fail) {
+      const title = document.getElementById('sf-prog-title');
+      const bar   = document.getElementById('sf-prog-bar');
+      const pctEl = document.getElementById('sf-prog-pct');
+      if (bar)   { bar.style.width = '100%'; bar.style.background = fail ? '#e53935' : '#43a047'; }
+      if (pctEl) pctEl.textContent = '100%';
+      if (title) title.textContent = fail
+        ? `上传完成：${ok} 成功，${fail} 失败`
+        : `✅ 全部上传成功（共 ${ok} 个文件）`;
+      // 3秒后无操作自动关闭
+      window._sfProgAutoClose = setTimeout(() => sfProgressClose(false), 3000);
+    }
+  };
+}
+
+function sfProgressClose(byUser) {
+  if (window._sfProgAutoClose) { clearTimeout(window._sfProgAutoClose); window._sfProgAutoClose = null; }
+  const el = document.getElementById('sf-progress-overlay');
+  if (el) el.remove();
+}
+
+async function sfDoUpload(input) {
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
   input.value = '';
-  if (ok) sfToast(`成功上传 ${ok} 个文件`);
+
+  const prog = sfProgressModal(files.length);
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    prog.setFile(file.name, 0, i + 1);
+    await new Promise(resolve => {
+      const fd = new FormData();
+      fd.append('file', file);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/share/dirs/${_sf.dirID}/upload`);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) prog.setFile(file.name, Math.round(e.loaded / e.total * 100), i + 1);
+      };
+      xhr.onload = () => {
+        prog.setFile(file.name, 100, i + 1);
+        try {
+          const j = JSON.parse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) ok++;
+          else { fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
+        } catch { fail++; }
+        resolve();
+      };
+      xhr.onerror = () => { fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
+      xhr.send(fd);
+    });
+  }
+
+  prog.done(ok, fail);
   sfLoadDir(_sf.dirID);
 }
 
