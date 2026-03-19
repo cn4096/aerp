@@ -100,12 +100,20 @@
   }
   /* 折叠态：隐藏文字和分组标题 */
   #sidebar.sidebar-collapsed .nav-label,
-  #sidebar.sidebar-collapsed .nav-section,
   #sidebar.sidebar-collapsed .logo-title,
   #sidebar.sidebar-collapsed .logo-sub,
   #sidebar.sidebar-collapsed .user-name,
   #sidebar.sidebar-collapsed .user-role {
     display: none;
+  }
+  /* 折叠态：分组标题变成细线分隔 */
+  #sidebar.sidebar-collapsed .nav-section {
+    font-size: 0;
+    padding: 0;
+    margin: 4px 8px;
+    height: 1px;
+    background: var(--border);
+    border: none;
   }
   #sidebar.sidebar-collapsed .nav-item {
     justify-content: center;
@@ -522,6 +530,7 @@ const state = {
   data: {},
   loading: false,
   chatUnread: 0,
+  siteSettings: JSON.parse(localStorage.getItem('erp_site_settings') || 'null'),
 };
 
 // ============================================================
@@ -607,12 +616,31 @@ function showUserProfile() {
 
 // 统一登出：清除本地状态并跳回登录页
 function doLogout() {
+  // 关闭并清空聊天模块状态，防止下个用户看到上个用户的数据
+  if (_chat.ws) {
+    _chat.ws.onclose = null; // 阻止自动重连
+    _chat.ws.close();
+    _chat.ws = null;
+  }
+  _chat.convs      = [];
+  _chat.contacts   = [];
+  _chat.activeGid  = null;
+  _chat.msgs       = {};
+  _chat.unread     = {};
+  _chat.typing     = {};
+  _chat.onlineSet  = new Set();
+  _chat.groupInfo  = {};
+  _chat.pendingGid = null;
+
   state.token = null;
   state.user  = null;
   state.page  = 'dashboard';
+  state.siteSettings = null;
+  state.chatUnread = 0;
   localStorage.removeItem('erp_token');
   localStorage.removeItem('erp_user');
   localStorage.removeItem('erp_last_page');
+  localStorage.removeItem('erp_site_settings');
   render();
 }
 
@@ -733,9 +761,12 @@ function renderSidebar() {
     { section: '系统' },
     { id: 'users',     icon: '👥', label: '员工管理', adminOnly: true },
     { id: 'templates', icon: '📄', label: '合同模板', adminOnly: true },
+    { id: 'sysadmin',  icon: '⚙️', label: '系统设置', adminOnly: true },
   ];
+  const logoTitle = (state.siteSettings && state.siteSettings.logo_title) || '智云 ERP';
+  const logoSub   = (state.siteSettings && state.siteSettings.logo_sub)   || 'v1.0 · Enterprise';
   let html = `<div id="sidebar"><div id="sidebar-resize-handle"></div><div class="logo" style="display:flex;align-items:center;justify-content:space-between">
-    <div><div class="logo-title">智云 ERP</div><div class="logo-sub">v1.0 · Enterprise</div></div>
+    <div><div class="logo-title">${escHtml(logoTitle)}</div><div class="logo-sub">${escHtml(logoSub)}</div></div>
     <button onclick="closeSidebar()" id="sidebar-close-btn" style="background:none;border:none;color:var(--text3);font-size:22px;cursor:pointer;padding:0 4px;line-height:1">×</button>
   </div><nav>`;
   for (const item of nav) {
@@ -772,6 +803,7 @@ function getPageTitle() {
     finance: '财务管理', bank: '银行流水-现金流', users: '员工管理', templates: '合同模板',
     reports: '报表中心', datacenter: '数据中心',
     chat: '聊天', sharefiles: '企业网盘',
+    sysadmin: '系统设置',
   };
   return titles[state.page] || '';
 }
@@ -853,21 +885,24 @@ function attachEvents() {
 
   // Auth
   const btnLogin = document.getElementById('btn-login');
-  if (btnLogin) btnLogin.addEventListener('click', doLogin);
+  if (btnLogin) btnLogin.onclick = doLogin;
 
   const btnReg = document.getElementById('btn-register');
-  if (btnReg) btnReg.addEventListener('click', doRegister);
+  if (btnReg) btnReg.onclick = doRegister;
 
   const authSwitch = document.getElementById('auth-switch');
   if (authSwitch) {
-    authSwitch.addEventListener('click', e => {
+    authSwitch.onclick = e => {
       e.preventDefault();
       const isLogin = authSwitch.textContent === '注册';
       document.getElementById('auth-form').innerHTML = isLogin ? renderRegisterForm() : renderLoginForm();
       authSwitch.textContent = isLogin ? '登录' : '注册';
       document.getElementById('auth-switch-text').textContent = isLogin ? '已有账户？' : '没有账户？';
+      // 清空上次的错误提示
+      const errEl = document.getElementById('auth-error');
+      if (errEl) errEl.innerHTML = '';
       attachEvents();
-    });
+    };
   }
 
   // Enter key on auth
@@ -902,8 +937,26 @@ async function doLogin() {
     state.user = { user_id: data.user_id, username: data.username, full_name: data.full_name, is_admin: data.is_admin, perms: data.perms };
     localStorage.setItem('erp_token', state.token);
     localStorage.setItem('erp_user', JSON.stringify(state.user));
-    render(); loadPage();
+    loadSiteSettings().then(() => { render(); loadPage(); });
   } catch (e) { showAuthError(e.message); }
+}
+
+// 加载并缓存站点设置（logo标题等），所有用户均可调用
+async function loadSiteSettings() {
+  try {
+    // 使用公开接口（无需管理员权限）
+    const res = await fetch('/api/auth/site/settings').then(r => r.json());
+    const pub = res.settings || {};
+    // 管理员额外获取完整设置
+    let full = {};
+    if (state.user?.is_admin) {
+      try { const r2 = await api('GET', '/admin/settings'); full = r2.settings || {}; } catch(e) {}
+    }
+    state.siteSettings = Object.assign({}, pub, full);
+    try { localStorage.setItem('erp_site_settings', JSON.stringify(state.siteSettings)); } catch(e) {}
+  } catch(e) {
+    state.siteSettings = JSON.parse(localStorage.getItem('erp_site_settings') || 'null') || {};
+  }
 }
 
 async function doRegister() {
@@ -918,11 +971,19 @@ async function doRegister() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password, full_name, email }),
     }).then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error); return d; }));
-    showAuthError('注册成功，请登录', 'success');
-    document.getElementById('auth-form').innerHTML = renderLoginForm();
-    document.getElementById('auth-switch').textContent = '注册';
-    document.getElementById('auth-switch-text').textContent = '没有账户？';
-    attachEvents();
+
+    // 注册成功后直接自动登录
+    const data = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    }).then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error); return d; }));
+
+    state.token = data.token;
+    state.user = { user_id: data.user_id, username: data.username, full_name: data.full_name, is_admin: data.is_admin, perms: data.perms };
+    localStorage.setItem('erp_token', state.token);
+    localStorage.setItem('erp_user', JSON.stringify(state.user));
+    loadSiteSettings().then(() => { render(); loadPage(); });
   } catch (e) { showAuthError(e.message); }
 }
 
@@ -936,17 +997,20 @@ function showAuthError(msg, type = 'error') {
 // ============================================================
 // 页面级权限配置：perm 为空表示所有登录用户可访问
 const PAGE_PERMS = {
-  products:  'products',
-  inventory: 'inventory',
-  customers: 'customers',
-  quotations:'quotations',
-  contracts: 'contracts',
-  finance:   'finance',
-  bank:      'bank',
-  chat:      'chat',
-  users:     'users',
-  templates: 'users',
-  dashboard: { any: ['finance', 'bank'] }, // 有 finance 或 bank 之一即可
+  products:   'products',
+  inventory:  'inventory',
+  customers:  'customers',
+  quotations: 'quotations',
+  contracts:  'contracts',
+  finance:    'finance',
+  bank:       'bank',
+  chat:       'chat',
+  users:      'users',
+  templates:  'users',
+  reports:    'reports',
+  sharefiles: 'sharefiles',
+  datacenter: 'datacenter',
+  dashboard:  { any: ['finance', 'bank'] },
 };
 
 function noPermHtml(page) {
@@ -954,6 +1018,7 @@ function noPermHtml(page) {
     products:'产品管理', inventory:'库存管理', customers:'客户管理',
     quotations:'报价系统', contracts:'合同管理', finance:'财务管理',
     bank:'银行流水', chat:'即时通讯', users:'员工管理', templates:'合同模板',
+    reports:'报表中心', sharefiles:'企业网盘', datacenter:'数据中心',
   };
   return `<div class="empty-state" style="padding:80px 0">
     <div class="icon" style="font-size:48px;margin-bottom:16px">🔒</div>
@@ -1009,7 +1074,7 @@ async function loadPage() {
 
   // 页面级权限检查（requiredPerm 可为字符串或数组，数组时需全部满足）
   const requiredPerm = PAGE_PERMS[state.page];
-  const isAdminPage  = state.page === 'users' || state.page === 'templates';
+  const isAdminPage  = state.page === 'users' || state.page === 'templates' || state.page === 'sysadmin';
   if (!state.user.is_admin) {
     if (isAdminPage && !hasPermission('users')) {
       content.innerHTML = noPermHtml(state.page);
@@ -1047,6 +1112,7 @@ async function loadPage() {
       case 'datacenter': await loadDataCenter(content, actions); break;
       case 'users': await loadUsers(content, actions); break;
       case 'templates': await loadTemplates(content, actions); break;
+      case 'sysadmin': await loadSysAdmin(content, actions); break;
       case 'chat': await loadChat(content, actions); break;
       case 'sharefiles': await loadShareFiles(content, actions); break;
       default: content.innerHTML = '<div class="empty-state"><div class="icon">🚧</div>开发中...</div>';
@@ -3515,6 +3581,7 @@ async function loadUsers(content, actions) {
     products: '产品管理', inventory: '库存管理', customers: '客户管理',
     quotations: '报价系统', contracts: '合同管理', finance: '财务管理',
     bank: '银行流水', chat: '即时通讯', users: '员工管理',
+    reports: '报表中心', sharefiles: '企业网盘', datacenter: '数据中心',
   };
 
   const renderPerms = (perms) => {
@@ -3637,6 +3704,7 @@ function openEmployeeModal(emp) {
     products: '产品管理', inventory: '库存管理', customers: '客户管理',
     quotations: '报价系统', contracts: '合同管理', finance: '财务管理',
     bank: '银行流水', chat: '即时通讯', users: '员工管理',
+    reports: '报表中心', sharefiles: '企业网盘', datacenter: '数据中心',
   };
 
   showModal(`
@@ -6057,26 +6125,98 @@ async function rptSaveAsReport() {
 
 // ── 共用弹窗 ─────────────────────────────────────────────────
 function _rptOpenSaveModal({ title, defName, defDesc, saveLabel, forceNew }) {
-  showModal(`
-  <div class="modal">
-    <div class="modal-header">${title}<span class="modal-close" onclick="closeModal()">×</span></div>
-    <div class="modal-body">
-      <div class="form-group">
-        <label>报表名称 <span style="color:var(--red)">*</span></label>
-        <input id="rpt-save-name" value="${escHtml(defName)}" placeholder="如：按月收入汇总">
+  // 加载用户列表用于「指定人」分享
+  api('GET', '/users').then(users => {
+    const userOpts = (users||[]).filter(u=>u.id!==state.user.user_id)
+      .map(u=>`<option value="${u.id}">${escHtml(u.full_name||u.username)}</option>`).join('');
+    const deptSet = new Set((users||[]).map(u=>u.department).filter(Boolean));
+    const deptOpts = [...deptSet].map(d=>`<option value="dept:${escHtml(d)}">${escHtml(d)}</option>`).join('');
+
+    showModal(`
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">${title}<span class="modal-close" onclick="closeModal()">×</span></div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>报表名称 <span style="color:var(--red)">*</span></label>
+          <input id="rpt-save-name" value="${escHtml(defName)}" placeholder="如：按月收入汇总">
+        </div>
+        <div class="form-group">
+          <label>描述（选填）</label>
+          <input id="rpt-save-desc" value="${escHtml(defDesc)}" placeholder="简要说明用途">
+        </div>
+        <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">分享设置</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+              <input type="radio" name="rpt-share" value="none" checked> 仅自己可见
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+              <input type="radio" name="rpt-share" value="all"> 全部成员可见
+            </label>
+            ${deptOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+              <input type="radio" name="rpt-share" value="dept"> 指定部门：
+              <select id="rpt-share-dept" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+                ${deptOpts}
+              </select>
+            </label>` : ''}
+            ${userOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+              <input type="radio" name="rpt-share" value="user"> 指定人员：
+              <select id="rpt-share-user" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+                ${userOpts}
+              </select>
+            </label>` : ''}
+          </div>
+        </div>
       </div>
-      <div class="form-group">
-        <label>描述（选填）</label>
-        <input id="rpt-save-desc" value="${escHtml(defDesc)}" placeholder="简要说明用途">
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="rptDoSave(${forceNew})">${saveLabel}</button>
       </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn btn-primary" onclick="rptDoSave(${forceNew})">${saveLabel}</button>
-    </div>
-  </div>`);
-  document.getElementById('modal-close').onclick = closeModal;
-  setTimeout(() => document.getElementById('rpt-save-name')?.focus(), 50);
+    </div>`);
+    document.getElementById('modal-close').onclick = closeModal;
+    setTimeout(() => document.getElementById('rpt-save-name')?.focus(), 50);
+
+    // 如已有分享设置则回填
+    if (_rptEditingId && !forceNew) {
+      api('GET', `/reports/${_rptEditingId}/shares`).then(res => {
+        const shares = res.data || [];
+        if (!shares.length) return;
+        const s = shares[0];
+        const radios = document.querySelectorAll('input[name="rpt-share"]');
+        radios.forEach(r => { if(r.value === s.share_type) r.checked = true; });
+        if (s.share_type === 'user' && s.target_id) {
+          const sel = document.getElementById('rpt-share-user');
+          if (sel) sel.value = s.target_id;
+        }
+        if (s.share_type === 'dept') {
+          // 找目标用户的部门
+          const sel = document.getElementById('rpt-share-dept');
+          if (sel && s.target_id) {
+            const u = (users||[]).find(x=>x.id==s.target_id);
+            if (u) sel.value = `dept:${u.department}`;
+          }
+        }
+      }).catch(()=>{});
+    }
+  }).catch(() => {
+    // 降级：无用户列表时显示简化弹窗
+    showModal(`
+    <div class="modal">
+      <div class="modal-header">${title}<span class="modal-close" onclick="closeModal()">×</span></div>
+      <div class="modal-body">
+        <div class="form-group"><label>报表名称 <span style="color:var(--red)">*</span></label>
+          <input id="rpt-save-name" value="${escHtml(defName)}" placeholder="如：按月收入汇总"></div>
+        <div class="form-group"><label>描述（选填）</label>
+          <input id="rpt-save-desc" value="${escHtml(defDesc)}" placeholder="简要说明用途"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="rptDoSave(${forceNew})">${saveLabel}</button>
+      </div>
+    </div>`);
+    document.getElementById('modal-close').onclick = closeModal;
+    setTimeout(() => document.getElementById('rpt-save-name')?.focus(), 50);
+  });
 }
 
 async function rptDoSave(forceNew = false) {
@@ -6086,17 +6226,39 @@ async function rptDoSave(forceNew = false) {
 
   const payload = { name, description: desc, config: _rptCloneCfg() };
   try {
+    let reportId;
     if (_rptEditingId && !forceNew) {
-      // 更新已有报表
       await api('PUT', `/reports/${_rptEditingId}`, payload);
+      reportId = _rptEditingId;
     } else {
-      // 新建（包括另存为）
       const res = await api('POST', '/reports', payload);
       _rptEditingId = res.id;
-      // 写入 localStorage，下次打开自动恢复到新副本
+      reportId = res.id;
       try { localStorage.setItem(_RPT_LAST_KEY, String(res.id)); } catch(e) {}
     }
-    // 刷新列表并高亮当前报表
+
+    // 提交分享设置
+    const shareRadio = document.querySelector('input[name="rpt-share"]:checked');
+    if (shareRadio) {
+      const shareType = shareRadio.value;
+      let shares = [];
+      if (shareType === 'all') {
+        shares = [{ share_type: 'all', target_id: null }];
+      } else if (shareType === 'dept') {
+        // 找该部门下任意一个用户作为代表（后端按department字段匹配）
+        const sel = document.getElementById('rpt-share-dept');
+        if (sel) {
+          const deptName = sel.value.replace(/^dept:/, '');
+          shares = [{ share_type: 'dept', target_id: null, dept_name: deptName }];
+        }
+      } else if (shareType === 'user') {
+        const sel = document.getElementById('rpt-share-user');
+        if (sel && sel.value) shares = [{ share_type: 'user', target_id: parseInt(sel.value) }];
+      }
+      // 若shareType为none则清空分享
+      await api('POST', `/reports/${reportId}/shares`, { shares });
+    }
+
     const listRes = await api('GET', '/reports');
     _rptSavedList = listRes.data || [];
     _rptRenderSavedList(_rptEditingId);
@@ -6109,36 +6271,48 @@ async function rptDoSave(forceNew = false) {
 // ── 删除报表（右键菜单 / 双击）────────────────────────────────
 // 在列表上长按或使用上下文菜单删除，此处简化为在加载时附加删除按钮
 function _rptRenderSavedList(activeId) {
-  // activeId 未传时沿用当前编辑中的报表 id
   if (activeId === undefined) activeId = _rptEditingId;
 
   const el = document.getElementById('rpt-list-inner');
   if (!el) return;
-  if (!_rptSavedList.length) {
+
+  const myList     = _rptSavedList.filter(r => !r.is_shared);
+  const sharedList = _rptSavedList.filter(r => r.is_shared);
+
+  if (!myList.length && !sharedList.length) {
     el.innerHTML = `<div style="padding:20px 14px;color:var(--text3);font-size:12px;text-align:center">暂无已保存报表<br>配置好后点「💾 保存报表」</div>`;
     return;
   }
-  el.innerHTML = _rptSavedList.map(r => {
-    const isActive = r.id === activeId;
+
+  const renderItem = (r) => {
+    const isActive    = r.id === activeId;
     const activeBg    = 'rgba(88,166,255,.15)';
     const activeBorder= '1px solid rgba(88,166,255,.35)';
-    const hoverBg     = 'var(--bg3)';
+    const shared      = r.is_shared ? '1' : '';
     return `
-    <div class="rpt-saved-item" data-rid="${r.id}"
+    <div class="rpt-saved-item" data-rid="${r.id}" data-shared="${shared}"
       onclick="rptLoadSaved(${r.id})"
       style="padding:8px 14px;cursor:pointer;border-radius:6px;margin:2px 6px;transition:background .15s,border .15s;position:relative;
              background:${isActive ? activeBg : ''};
              border:${isActive ? activeBorder : '1px solid transparent'}"
-      onmouseenter="if(this.dataset.rid!='${activeId}'){this.style.background='${hoverBg}'};this.querySelector('.rpt-del-btn').style.opacity='1'"
-      onmouseleave="if(this.dataset.rid!='${activeId}'){this.style.background=''};this.querySelector('.rpt-del-btn').style.opacity='0'">
+      onmouseenter="if(this.dataset.rid!='${activeId}'){this.style.background='var(--bg3)'};if(!this.dataset.shared){var b=this.querySelector('.rpt-del-btn');if(b)b.style.opacity='1';}"
+      onmouseleave="if(this.dataset.rid!='${activeId}'){this.style.background=''};if(!this.dataset.shared){var b=this.querySelector('.rpt-del-btn');if(b)b.style.opacity='0';}">
       <div style="font-size:13px;font-weight:500;color:${isActive ? 'var(--accent)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:20px">${escHtml(r.name)}</div>
+      ${r.is_shared ? `<div style="font-size:11px;color:var(--accent);margin-top:2px;opacity:.8">📤 ${escHtml(r.owner_name||'')} 的报表</div>` : ''}
       ${r.description ? `<div style="font-size:11px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(r.description)}</div>` : ''}
       <div style="font-size:11px;color:var(--text3);margin-top:3px">${(r.updated_at||'').slice(0,10)}</div>
-      <button class="rpt-del-btn" onclick="rptDeleteSaved(${r.id},event)"
+      ${r.is_shared ? '' : `<button class="rpt-del-btn" onclick="rptDeleteSaved(${r.id},event)"
         style="position:absolute;right:8px;top:8px;background:none;border:none;color:var(--red);cursor:pointer;font-size:15px;opacity:0;transition:opacity .15s;padding:2px 4px"
-        title="删除报表">×</button>
+        title="删除报表">×</button>`}
     </div>`;
-  }).join('');
+  };
+
+  let html = myList.map(renderItem).join('');
+  if (sharedList.length) {
+    html += `<div style="padding:8px 14px 4px;font-size:11px;font-weight:600;color:var(--text3);letter-spacing:.05em;text-transform:uppercase;margin-top:6px;border-top:1px solid var(--border)">他人分享</div>`;
+    html += sharedList.map(renderItem).join('');
+  }
+  el.innerHTML = html;
 }
 
 async function rptDeleteSaved(id, e) {
@@ -6268,6 +6442,7 @@ async function dcLoadContent() {
         <button class="btn btn-sm" onclick="dcImportExcel()">📥 导入Excel</button>
         <button class="btn btn-sm" onclick="dcExport()">📤 导出</button>
         <button class="btn btn-sm" onclick="dcManageFormats()">📐 导入格式</button>
+        <button class="btn btn-sm" onclick="dcShareTable()">🔗 分享</button>
         <button class="btn btn-sm" onclick="dcEditTable()">⚙️ 表结构</button>
       </div>
     </div>
@@ -6862,6 +7037,98 @@ async function dcImportConfirm(token, headerCount) {
   } catch(e) { alert('导入失败: ' + e.message); }
 }
 
+// ── 数据中心表分享 ────────────────────────────────────────────
+async function dcShareTable() {
+  if (!_dcActiveTable) return;
+  const t = _dcActiveTable;
+
+  // 检查是否自己创建的
+  if (t.created_by && t.created_by !== state.user.user_id && !state.user.is_admin) {
+    alert('只有创建者才能管理分享设置');
+    return;
+  }
+
+  const [usersRes, sharesRes] = await Promise.all([
+    api('GET', '/users').catch(() => []),
+    api('GET', `/dc/tables/${t.id}/shares`).catch(() => ({ data: [] })),
+  ]);
+  const users  = usersRes || [];
+  const shares = sharesRes.data || [];
+  const cur    = shares[0] || null;
+
+  const deptSet  = new Set(users.map(u => u.department).filter(Boolean));
+  const deptOpts = [...deptSet].map(d => `<option value="${escHtml(d)}">${escHtml(d)}</option>`).join('');
+  const userOpts = users.filter(u => u.id !== state.user.user_id)
+    .map(u => `<option value="${u.id}">${escHtml(u.full_name || u.username)}</option>`).join('');
+
+  showModal(`
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">🔗 分享「${escHtml(t.name)}」<span class="modal-close" id="modal-close">×</span></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">设置谁可以访问此数据表</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="none" ${!cur?'checked':''}> 仅自己可见
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="all" ${cur?.share_type==='all'?'checked':''}> 全部成员可见
+        </label>
+        ${deptOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="dept" ${cur?.share_type==='dept'?'checked':''}> 指定部门：
+          <select id="dc-share-dept" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${deptOpts}
+          </select>
+        </label>` : ''}
+        ${userOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="user" ${cur?.share_type==='user'?'checked':''}> 指定人员：
+          <select id="dc-share-user" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${userOpts}
+          </select>
+        </label>` : ''}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcSaveShare(${t.id})">保存</button>
+    </div>
+  </div>`);
+
+  document.getElementById('modal-close').onclick = closeModal;
+
+  // 回填当前分享设置
+  if (cur?.share_type === 'user' && cur.target_id) {
+    const sel = document.getElementById('dc-share-user');
+    if (sel) sel.value = cur.target_id;
+  }
+}
+
+async function dcSaveShare(tid) {
+  const radio = document.querySelector('input[name="dc-share"]:checked');
+  if (!radio) return;
+  const shareType = radio.value;
+  let shares = [];
+
+  if (shareType === 'all') {
+    shares = [{ share_type: 'all', target_id: null }];
+  } else if (shareType === 'dept') {
+    const sel = document.getElementById('dc-share-dept');
+    if (sel) shares = [{ share_type: 'dept', target_id: null, dept_name: sel.value }];
+  } else if (shareType === 'user') {
+    const sel = document.getElementById('dc-share-user');
+    if (sel && sel.value) shares = [{ share_type: 'user', target_id: parseInt(sel.value) }];
+  }
+  // none 时 shares=[] 清空
+
+  try {
+    await api('POST', `/dc/tables/${tid}/shares`, { shares });
+    closeModal();
+    // 若是分享给别人后，本地列表名称可能已经是带标注的，刷新一下
+    const listRes = await api('GET', '/dc/tables');
+    _dcTables = listRes.data || [];
+    dcRenderSidebar();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
 // ── 导出 Excel ────────────────────────────────────────────────
 async function dcExport() {
   if (!_dcActiveTable) return;
@@ -6869,6 +7136,102 @@ async function dcExport() {
 }
 
 // ── 导入格式管理 ──────────────────────────────────────────────
+// ── 数据中心表分享 ───────────────────────────────────────────
+async function dcShareTable() {
+  if (!_dcActiveTable) return;
+  const t = _dcActiveTable;
+
+  // 判断是否是自己创建的
+  const isOwner = (t.created_by === state.user.user_id) || state.user.is_admin;
+
+  // 加载用户列表 + 当前分享设置
+  const [users, sharesRes] = await Promise.all([
+    api('GET', '/users').catch(() => []),
+    isOwner ? api('GET', `/dc/tables/${t.id}/shares`).catch(() => ({ data: [] })) : Promise.resolve({ data: [] }),
+  ]);
+
+  const curShares = sharesRes.data || [];
+  const curShare  = curShares[0] || null;
+
+  const deptSet  = new Set((users||[]).map(u => u.department).filter(Boolean));
+  const deptOpts = [...deptSet].map(d => `<option value="${escHtml(d)}">${escHtml(d)}</option>`).join('');
+  const userOpts = (users||[]).filter(u => u.id !== state.user.user_id)
+    .map(u => `<option value="${u.id}">${escHtml(u.full_name||u.username)}</option>`).join('');
+
+  // 回填当前分享设置
+  const curType  = curShare?.share_type || 'none';
+  const curUser  = curShare?.target_id  || '';
+
+  showModal(`
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">🔗 分享数据表 — ${escHtml(t.name)}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      ${!isOwner ? `<div style="padding:10px 14px;background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.3);border-radius:8px;font-size:13px;color:var(--text2)">
+        ⚠️ 只有数据表创建者才能修改分享设置
+      </div>` : `
+      <div style="font-size:13px;color:var(--text3);margin-bottom:12px">设置哪些人可以查看和操作此数据表</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg3)">
+          <input type="radio" name="dc-share" value="none" ${curType==='none'?'checked':''}> 仅自己可见
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg3)">
+          <input type="radio" name="dc-share" value="all" ${curType==='all'?'checked':''}> 全部成员可见
+        </label>
+        ${deptOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg3)">
+          <input type="radio" name="dc-share" value="dept" ${curType==='dept'?'checked':''}> 指定部门：
+          <select id="dc-share-dept" style="font-size:12px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${deptOpts}
+          </select>
+        </label>` : ''}
+        ${userOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg3)">
+          <input type="radio" name="dc-share" value="user" ${curType==='user'?'checked':''}> 指定人员：
+          <select id="dc-share-user" style="font-size:12px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${userOpts}
+          </select>
+        </label>` : ''}
+      </div>`}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">关闭</button>
+      ${isOwner ? `<button class="btn btn-primary" onclick="dcSaveShare(${t.id})">保存</button>` : ''}
+    </div>
+  </div>`);
+  document.querySelector('.modal-close').onclick = closeModal;
+
+  // 回填指定用户
+  if (curType === 'user' && curUser) {
+    const sel = document.getElementById('dc-share-user');
+    if (sel) sel.value = curUser;
+  }
+}
+
+async function dcSaveShare(tableId) {
+  const radio = document.querySelector('input[name="dc-share"]:checked');
+  if (!radio) return;
+  const shareType = radio.value;
+  let shares = [];
+
+  if (shareType === 'all') {
+    shares = [{ share_type: 'all', target_id: null }];
+  } else if (shareType === 'dept') {
+    const deptName = document.getElementById('dc-share-dept')?.value || '';
+    shares = deptName ? [{ share_type: 'dept', target_id: null, dept_name: deptName }] : [];
+  } else if (shareType === 'user') {
+    const uid = parseInt(document.getElementById('dc-share-user')?.value || '0');
+    if (uid) shares = [{ share_type: 'user', target_id: uid }];
+  }
+  // none 则 shares=[] 清空分享
+
+  try {
+    await api('POST', `/dc/tables/${tableId}/shares`, { shares });
+    closeModal();
+    // 刷新侧边栏（分享名称标注可能改变）
+    const listRes = await api('GET', '/dc/tables');
+    _dcTables = listRes.data || [];
+    dcRenderSidebar();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
 async function dcManageFormats() {
   if (!_dcActiveTable) return;
   const t = _dcActiveTable;
@@ -6932,7 +7295,425 @@ async function dcDeleteFormat(tid, fid, btn) {
   btn.closest('div[style]').remove();
 }
 
+// ── 数据中心表分享 ────────────────────────────────────────────
+async function dcShareTable() {
+  if (!_dcActiveTable) return;
+  const t = _dcActiveTable;
+
+  // 加载用户列表
+  let users = [];
+  try { users = await api('GET', '/users'); } catch(e) {}
+  const deptSet = new Set(users.filter(u=>u.department).map(u=>u.department));
+  const deptOpts = [...deptSet].map(d=>`<option value="${escHtml(d)}">${escHtml(d)}</option>`).join('');
+  const userOpts = users.filter(u=>u.id!==state.user.user_id)
+    .map(u=>`<option value="${u.id}">${escHtml(u.full_name||u.username)}</option>`).join('');
+
+  // 加载现有分享设置
+  let curShares = [];
+  try { const r = await api('GET', `/dc/tables/${t.id}/shares`); curShares = r.data||[]; } catch(e) {}
+  const cur = curShares[0];
+  const curType = cur?.share_type || 'none';
+
+  showModal(`
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">🔗 分享「${escHtml(t.name)}」<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:14px">设置后，被分享的用户可在数据中心看到此表，并可查看数据、导入数据。</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="none" ${curType==='none'?'checked':''}> 仅自己可见
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="all" ${curType==='all'?'checked':''}> 全部成员可见
+        </label>
+        ${deptOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="dept" ${curType==='dept'?'checked':''}> 指定部门：
+          <select id="dc-share-dept" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${deptOpts}
+          </select>
+        </label>` : ''}
+        ${userOpts ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="radio" name="dc-share" value="user" ${curType==='user'?'checked':''}> 指定人员：
+          <select id="dc-share-user" style="font-size:12px;padding:3px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text)">
+            ${userOpts}
+          </select>
+        </label>` : ''}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcSaveShare(${t.id})">保存分享设置</button>
+    </div>
+  </div>`);
+  document.querySelector('.modal-close').onclick = closeModal;
+
+  // 回填现有设置
+  if (cur) {
+    if (cur.share_type === 'user' && cur.target_id) {
+      const sel = document.getElementById('dc-share-user');
+      if (sel) sel.value = String(cur.target_id);
+    }
+    if (cur.share_type === 'dept' && cur.target_name) {
+      // target_name 是部门代表用户名，需用其部门
+      const u = users.find(x=>x.id==cur.target_id);
+      if (u) {
+        const sel = document.getElementById('dc-share-dept');
+        if (sel) sel.value = u.department;
+      }
+    }
+  }
+}
+
+async function dcSaveShare(tid) {
+  const radio = document.querySelector('input[name="dc-share"]:checked');
+  if (!radio) return;
+  const shareType = radio.value;
+  let shares = [];
+  if (shareType === 'all') {
+    shares = [{ share_type: 'all', target_id: null }];
+  } else if (shareType === 'dept') {
+    const sel = document.getElementById('dc-share-dept');
+    const deptName = sel?.value || '';
+    if (deptName) shares = [{ share_type: 'dept', target_id: null, dept_name: deptName }];
+  } else if (shareType === 'user') {
+    const sel = document.getElementById('dc-share-user');
+    if (sel?.value) shares = [{ share_type: 'user', target_id: parseInt(sel.value) }];
+  }
+  try {
+    await api('POST', `/dc/tables/${tid}/shares`, { shares });
+    closeModal();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
 // ============================================================
+// ============================================================
+// SYSADMIN — 系统设置
+// ============================================================
+
+async function loadSysAdmin(content, actions) {
+  if (!state.user?.is_admin) {
+    content.innerHTML = noPermHtml('sysadmin');
+    return;
+  }
+
+  content.innerHTML = `
+  <div style="max-width:900px;margin:0 auto">
+    <!-- Tab 切换 -->
+    <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid var(--border);padding-bottom:0">
+      <button id="sa-tab-info" onclick="saSwitchTab('info')"
+        style="padding:8px 20px;background:none;border:none;border-bottom:2px solid var(--accent);margin-bottom:-2px;
+               font-size:14px;font-weight:600;color:var(--accent);cursor:pointer">🖥️ 系统信息</button>
+      <button id="sa-tab-company" onclick="saSwitchTab('company')"
+        style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
+               font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">🏢 企业信息</button>
+      <button id="sa-tab-settings" onclick="saSwitchTab('settings')"
+        style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
+               font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">⚙️ 系统设置</button>
+    </div>
+
+    <!-- 系统信息面板 -->
+    <div id="sa-panel-info">
+      <div id="sa-sysinfo-body">
+        <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- 企业信息面板 -->
+    <div id="sa-panel-company" style="display:none">
+      <div id="sa-company-body">
+        <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- 系统设置面板 -->
+    <div id="sa-panel-settings" style="display:none">
+      <div id="sa-settings-body">
+        <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
+      </div>
+    </div>
+  </div>`;
+
+  saLoadSysInfo();
+}
+
+function saSwitchTab(tab) {
+  ['info','company','settings'].forEach(t => {
+    const btn   = document.getElementById(`sa-tab-${t}`);
+    const panel = document.getElementById(`sa-panel-${t}`);
+    const isActive = t === tab;
+    if (btn) {
+      btn.style.borderBottomColor = isActive ? 'var(--accent)' : 'transparent';
+      btn.style.color = isActive ? 'var(--accent)' : 'var(--text3)';
+      btn.style.fontWeight = isActive ? '600' : '500';
+    }
+    if (panel) panel.style.display = isActive ? '' : 'none';
+  });
+  if (tab === 'info')     saLoadSysInfo();
+  if (tab === 'company')  saLoadCompany();
+  if (tab === 'settings') saLoadSettings();
+}
+
+// ── 系统信息 ─────────────────────────────────────────────────
+async function saLoadSysInfo() {
+  const body = document.getElementById('sa-sysinfo-body');
+  if (!body) return;
+  try {
+    const d = await api('GET', '/admin/sysinfo');
+
+    const row = (label, val) => `
+      <tr>
+        <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">${label}</td>
+        <td style="padding:9px 16px;font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace">${escHtml(String(val||'—'))}</td>
+      </tr>`;
+
+    const section = (icon, title, rows) => `
+      <div class="card" style="margin-bottom:16px;padding:0;overflow:hidden">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent);display:flex;align-items:center;gap:8px">
+          <span>${icon}</span><span>${title}</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse">${rows}</table>
+      </div>`;
+
+    const mem = d.memory;
+    const memPct = mem.pct ? parseFloat(mem.pct).toFixed(1) : '0';
+    const memColor = mem.pct > 85 ? 'var(--red)' : mem.pct > 65 ? 'var(--yellow)' : 'var(--green)';
+    const memBarRow = `
+      <tr>
+        <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">使用率</td>
+        <td style="padding:9px 16px">
+          <div style="background:var(--bg3);border-radius:4px;height:10px;overflow:hidden">
+            <div style="height:100%;width:${memPct}%;background:${memColor};border-radius:4px;transition:width .5s"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">${memPct}%　已用 ${mem.used_gb} GB / 共 ${mem.total_gb} GB</div>
+        </td>
+      </tr>`;
+
+    const disk = Array.isArray(d.disk) ? d.disk[0] : d.disk;
+    const diskPct = disk?.pct ? parseFloat(disk.pct).toFixed(1) : '0';
+    const diskColor = disk?.pct > 85 ? 'var(--red)' : disk?.pct > 65 ? 'var(--yellow)' : '#e6a817';
+    const diskBarRow = disk ? `
+      <tr>
+        <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">${escHtml(disk.mount||'/')}${disk.fs_type?` <span style="color:var(--text3);font-size:11px">(${escHtml(disk.fs_type)})</span>`:''}</td>
+        <td style="padding:9px 16px">
+          <div style="font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace;margin-bottom:4px">${disk.used_gb} / ${disk.total_gb} GB</div>
+          <div style="background:var(--bg3);border-radius:4px;height:10px;overflow:hidden">
+            <div style="height:100%;width:${diskPct}%;background:${diskColor};border-radius:4px"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">${diskPct}%</div>
+        </td>
+      </tr>` : '';
+
+    const cpu = d.cpu;
+    const freqStr = (cpu.freq_min_ghz && cpu.freq_max_ghz && cpu.freq_min_ghz !== '0.00')
+      ? `${cpu.freq_min_ghz} ~ ${cpu.freq_max_ghz} GHz` : '—';
+
+    body.innerHTML =
+      section('💻', '操作系统',
+        row('主机名', d.os.hostname) +
+        row('系统', d.os.system) +
+        row('架构', d.os.arch) +
+        row('内核', d.os.kernel || '—') +
+        row('运行时间', d.os.uptime || '—')
+      ) +
+      section('⚙️', 'CPU',
+        row('型号', cpu.model || '—') +
+        row('物理核心', cpu.phys_cores ? cpu.phys_cores + ' 核' : '—') +
+        row('逻辑线程', cpu.logic_cores + ' 线程') +
+        row('主频', freqStr)
+      ) +
+      section('🧠', '内存',
+        row('总内存', mem.total_gb > 0 ? mem.total_gb + ' GB' : '—') +
+        row('已使用', mem.used_gb  > 0 ? mem.used_gb  + ' GB' : '—') +
+        row('可用',   mem.avail_gb > 0 ? mem.avail_gb + ' GB' : '—') +
+        memBarRow
+      ) +
+      section('💾', '磁盘', diskBarRow) +
+      section('🚀', '应用信息',
+        `<tr>
+          <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">软件版本</td>
+          <td style="padding:9px 16px;font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace"
+              title="${escHtml(d.go.version)}">${escHtml(String(d.go.app_version||'—'))}</td>
+        </tr>` +
+        row('构建日期', d.go.build_time  || '—') +
+        row('协程数',   d.go.goroutines) +
+        row('程序内存', `${d.go.mem_alloc_mb} MB（堆）/ ${d.go.mem_sys_mb} MB（系统申请）`) +
+        row('版权所有', d.go.copyright || '—')
+      );
+
+  } catch(e) {
+    if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+// ── 系统设置 ─────────────────────────────────────────────────
+async function saLoadSettings() {
+  const body = document.getElementById('sa-settings-body');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>';
+  try {
+    const res = await api('GET', '/admin/settings');
+    const s   = res.settings || {};
+
+    // 通用输入行生成器
+    const inputRow = (label, key, placeholder='', hint='') => `
+      <div style="display:flex;align-items:${hint?'flex-start':'center'};gap:16px;padding:12px 0;border-bottom:1px solid var(--border)">
+        <div style="width:110px;flex-shrink:0;font-size:13px;color:var(--text3)">${label}</div>
+        <div style="flex:1">
+          <input id="sa-input-${key}" value="${escHtml(s[key]||'')}" placeholder="${escHtml(placeholder)}"
+            style="width:100%;padding:6px 10px;font-size:13px;background:var(--bg3);border:1px solid var(--border);
+                   border-radius:6px;color:var(--text);box-sizing:border-box">
+          ${hint?`<div style="font-size:11px;color:var(--text3);margin-top:4px">${hint}</div>`:''}
+        </div>
+      </div>`;
+
+    const card = (icon, title, content, saveKey) => `
+      <div class="card" style="max-width:680px;padding:0;overflow:hidden;margin-bottom:16px">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent)">${icon} ${title}</div>
+        <div style="padding:4px 20px 8px">${content}</div>
+        <div style="padding:10px 20px 16px;display:flex;justify-content:flex-end">
+          <button class="btn btn-primary btn-sm" onclick="saSaveGroup('${saveKey}',this)">💾 保存</button>
+        </div>
+      </div>`;
+
+    body.innerHTML =
+      // ── 注册与访问 ──
+      `<div class="card" style="max-width:680px;padding:0;overflow:hidden;margin-bottom:16px">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent)">⚙️ 注册与访问</div>
+        <div style="padding:20px 20px 24px">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 0">
+            <div>
+              <div style="font-size:14px;font-weight:500;color:var(--text)">允许新用户注册</div>
+              <div style="font-size:12px;color:var(--text3);margin-top:3px">关闭后，访客将无法自行注册账号，只能由管理员创建</div>
+            </div>
+            <div id="sa-toggle-allow_register"
+              data-on="${s.allow_register!=='false'?'1':''}"
+              onclick="saToggle(this,'allow_register')"
+              style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin-left:16px;cursor:pointer">
+              <span style="position:absolute;inset:0;border-radius:12px;transition:background .2s;
+                           background:${s.allow_register!=='false'?'var(--accent)':'var(--border)'}"></span>
+              <span style="position:absolute;top:3px;left:${s.allow_register!=='false'?'23px':'3px'};width:18px;height:18px;
+                           border-radius:50%;background:#fff;transition:left .2s;pointer-events:none"></span>
+            </div>
+          </div>
+        </div>
+      </div>` +
+
+      // ── 界面设置 ──
+      card('🎨', '界面设置',
+        inputRow('左上角标题', 'logo_title', '智云 ERP', '侧边栏左上角大标题') +
+        inputRow('左上角副标题', 'logo_sub', 'v1.0 · Enterprise', '大标题下方的小字'),
+        'ui'
+      );
+
+  } catch(e) {
+    if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+// 企业信息独立加载函数
+async function saLoadCompany() {
+  const body = document.getElementById('sa-company-body');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>';
+  try {
+    const res = await api('GET', '/admin/settings');
+    const s   = res.settings || {};
+
+    const inputRow = (label, key, placeholder='') => `
+      <div style="display:flex;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--border)">
+        <div style="width:110px;flex-shrink:0;font-size:13px;color:var(--text3)">${label}</div>
+        <input id="sa-input-${key}" value="${escHtml(s[key]||'')}" placeholder="${escHtml(placeholder)}"
+          style="flex:1;padding:6px 10px;font-size:13px;background:var(--bg3);border:1px solid var(--border);
+                 border-radius:6px;color:var(--text);box-sizing:border-box">
+      </div>`;
+
+    body.innerHTML = `
+    <div class="card" style="max-width:680px;padding:0;overflow:hidden">
+      <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                  font-size:13px;font-weight:700;color:var(--accent)">🏢 企业信息</div>
+      <div style="padding:4px 20px 8px">
+        ${inputRow('公司名称',   'company_name',    '例：深圳市XXX有限公司')}
+        ${inputRow('银行账户',   'bank_account',    '银行账号')}
+        ${inputRow('银行开户行', 'bank_name',       '开户行全称')}
+        ${inputRow('注册地址',   'reg_address',     '营业执照注册地址')}
+        ${inputRow('统一税号',   'tax_number',      '统一社会信用代码')}
+        ${inputRow('注册电话',   'reg_phone',       '营业执照电话')}
+        ${inputRow('公司地址',   'company_address', '实际办公地址')}
+        ${inputRow('联系电话',   'contact_phone',   '对外联系电话')}
+        ${inputRow('联系人',     'contact_name',    '对外联系人姓名')}
+      </div>
+      <div style="padding:10px 20px 16px;display:flex;justify-content:flex-end">
+        <button class="btn btn-primary btn-sm" onclick="saSaveGroup('company',this)">💾 保存</button>
+      </div>
+    </div>`;
+  } catch(e) {
+    if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+// 按组保存设置
+async function saSaveGroup(group, btn) {
+  const keyMap = {
+    ui:      ['logo_title', 'logo_sub'],
+    company: ['company_name','bank_account','bank_name','reg_address',
+              'tax_number','reg_phone','company_address','contact_phone','contact_name'],
+  };
+  const keys = keyMap[group] || [];
+  const body = {};
+  for (const k of keys) {
+    const el = document.getElementById(`sa-input-${k}`);
+    if (el) body[k] = el.value.trim();
+  }
+  try {
+    await api('PUT', '/admin/settings', body);
+    // 界面设置保存后立即刷新侧边栏logo
+    if (group === 'ui') saApplyLogoSettings(body);
+    const orig = btn.textContent;
+    btn.textContent = '✓ 已保存';
+    btn.disabled = true;
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
+// 应用logo设置到当前页面
+function saApplyLogoSettings(s) {
+  // 更新state缓存
+  if (!state.siteSettings) state.siteSettings = {};
+  if (s.logo_title) state.siteSettings.logo_title = s.logo_title;
+  if (s.logo_sub)   state.siteSettings.logo_sub   = s.logo_sub;
+  try { localStorage.setItem('erp_site_settings', JSON.stringify(state.siteSettings)); } catch(e) {}
+  // 直接更新DOM，不用重渲染整个侧边栏
+  document.querySelectorAll('.logo-title').forEach(el => el.textContent = s.logo_title || el.textContent);
+  document.querySelectorAll('.logo-sub').forEach(el   => el.textContent = s.logo_sub   || el.textContent);
+}
+
+async function saToggle(el, key) {
+  if (el.dataset.saving) return;  // 防止请求未完成时重复点击
+  const isOn  = !!el.dataset.on;
+  const newOn = !isOn;
+
+  // 立即更新视觉和状态
+  el.dataset.on = newOn ? '1' : '';
+  const spans = el.querySelectorAll('span');
+  if (spans[0]) spans[0].style.background = newOn ? 'var(--accent)' : 'var(--border)';
+  if (spans[1]) spans[1].style.left       = newOn ? '23px' : '3px';
+
+  el.dataset.saving = '1';
+  try {
+    await api('PUT', '/admin/settings', { [key]: newOn ? 'true' : 'false' });
+  } catch(e) {
+    // 回滚
+    el.dataset.on = isOn ? '1' : '';
+    if (spans[0]) spans[0].style.background = isOn ? 'var(--accent)' : 'var(--border)';
+    if (spans[1]) spans[1].style.left       = isOn ? '23px' : '3px';
+    alert('保存失败：' + e.message);
+  }
+  delete el.dataset.saving;
+}
+
 // CHAT MODULE
 // ============================================================
 
