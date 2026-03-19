@@ -8,8 +8,8 @@ RUN apk add --no-cache \
     && rm -rf /var/cache/apk/*
 
 # 创建非 root 用户
-RUN adduser -D -u 1000 user
-USER user
+#RUN adduser -D -u 1000 user
+#USER user
 
 # 设置工作目录
 ENV HOME=/home/user
@@ -21,8 +21,8 @@ ARG TARGETOS
 ARG TARGETARCH
 
 # 将所有可执行文件复制到容器内
-COPY --chown=user . .
-
+#COPY --chown=user . .
+COPY . .
 # 动态查找并准备可执行文件
 RUN <<EOF
 #!/bin/sh
