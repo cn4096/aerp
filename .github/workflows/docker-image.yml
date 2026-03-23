@@ -52,7 +52,7 @@ jobs:
           echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
           echo "-------------------------Tokens Ready----------------------"
           echo "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
-          echo "----------开始清空旧的数据------------"
+          echo "----------开始编译固件------------"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           image-names: claw_host
           image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
-          cut-off: 1 second ago UTC
+          cut-off: 1                      # 单位：秒，v3.x 只接受纯数字（距今多少秒前）
           keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
 
       # -------------------------------------------------------------------------
@@ -131,3 +131,10 @@ jobs:
           repository: ${{ github.repository }}
           retain_days: 0                  # 不按天数限制，仅按条数保留
           keep_minimum_runs: ${{ env.KEEP_WORKFLOWS }}
+
+      # -------------------------------------------------------------------------
+      # 收尾提示：所有构建与清理步骤完成后输出结束标记，方便在日志中快速定位。
+      # -------------------------------------------------------------------------
+      - name: Done
+        run: |
+          echo "----------数据清除完毕. 任务完成！------------"
