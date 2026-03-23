@@ -101,14 +101,14 @@ jobs:
       # -------------------------------------------------------------------------
       - name: Delete old Docker image versions (keep latest ${{ env.KEEP_VERSIONS }})
         if: github.event_name != 'pull_request'
-        uses: snok/container-retention-policy@v2        # v3.0.0 有解析 bug，固定使用 v2 稳定版
+        uses: snok/container-retention-policy@v2        # v2 参数名与 v3 不同，以下为 v2 正确字段
         with:
-          account: ${{ github.repository_owner }}
+          account-type: personal          # 个人账号填 personal，组织账号填 org
           token: ${{ secrets.GITHUB_TOKEN }}
           image-names: claw_host
-          image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
-          cut-off: 1 second ago UTC       # v2 格式：自然语言时间字符串
-          keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
+          untagged-only: true             # 只删除 untagged 版本，带 tag（如 latest）的不受影响
+          cut-off: 1 second ago UTC       # v2 格式：自然语言时间字符串，保护刚推送的新层
+          keep-at-least: ${{ env.KEEP_VERSIONS }}  # 至少保留最近 N 个版本
           
       - name: Delete Old Workflows
         uses: Mattraks/delete-workflow-runs@main
