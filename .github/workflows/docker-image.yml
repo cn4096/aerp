@@ -52,7 +52,7 @@ jobs:
           echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
           echo "-------------------------Tokens Ready----------------------"
           echo "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
-          echo "----------开始编译固件------------"
+          echo "----------开始编译------------"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           image-names: claw_host
           image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
-          cut-off: 1                      # 单位：秒，v3.x 只接受纯数字（距今多少秒前）
+          cut-off: 1sec                   # v3.x 格式：数字+单位，如 1sec / 1min / 1h
           keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
 
       # -------------------------------------------------------------------------
@@ -137,4 +137,4 @@ jobs:
       # -------------------------------------------------------------------------
       - name: Done
         run: |
-          echo "----------数据清除完毕. 任务完成！------------"
+          echo "----------数据清除完毕.------------"
