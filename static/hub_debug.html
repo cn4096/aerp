@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hub 调试面板</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+header{background:linear-gradient(135deg,#667eea,#764ba2);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+header h1{font-size:16px;font-weight:700;letter-spacing:.5px}
+.conn-bar{display:flex;align-items:center;gap:10px;font-size:13px}
+.dot{width:10px;height:10px;border-radius:50%;background:#fc8181;flex-shrink:0;transition:background .3s}
+.dot.on{background:#68d391}
+.dot.connecting{background:#f6ad55;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+#connLabel{font-size:12px;color:rgba(255,255,255,.8)}
+
+.main{display:flex;flex:1;overflow:hidden}
+
+/* ── 左侧控制区 ── */
+.sidebar{width:320px;flex-shrink:0;border-right:1px solid #1e2535;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden}
+.panel{padding:14px;border-bottom:1px solid #1e2535}
+.panel-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#667eea;margin-bottom:10px}
+label{font-size:12px;color:#a0aec0;display:block;margin-bottom:4px}
+input,textarea,select{width:100%;padding:7px 9px;background:#1a2035;border:1px solid #2d3748;border-radius:5px;color:#e2e8f0;font-size:13px;outline:none;transition:border-color .15s}
+input:focus,textarea:focus,select:focus{border-color:#667eea}
+textarea{resize:vertical;font-family:monospace;min-height:70px}
+.row{display:flex;gap:8px;margin-top:8px}
+.row input{flex:1}
+btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:6px 14px;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600;transition:filter .15s;white-space:nowrap}
+.btn:hover{filter:brightness(1.15)}
+.btn-primary{background:#667eea;color:#fff}
+.btn-danger{background:#fc8181;color:#1a1a2e}
+.btn-success{background:#68d391;color:#1a1a2e}
+.btn-ghost{background:#2d3748;color:#e2e8f0}
+.btn-sm{padding:4px 10px;font-size:12px}
+.form-gap{margin-top:8px}
+.ttl-row{display:flex;gap:8px;align-items:center;margin-top:6px}
+.ttl-row label{margin:0;white-space:nowrap}
+.ttl-row input{width:80px}
+
+/* 订阅列表 */
+.sub-list{padding:10px 14px}
+.sub-item{display:flex;align-items:center;justify-content:space-between;background:#1a2035;border:1px solid #2d3748;border-radius:5px;padding:6px 10px;margin-bottom:6px;font-size:12px}
+.sub-pattern{color:#90cdf4;font-family:monospace}
+.sub-proto{font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;margin-left:6px}
+.sub-proto.ws{background:#2b4a7a;color:#90cdf4}
+.sub-proto.http{background:#2a4a2a;color:#68d391}
+
+/* ── 右侧日志区 ── */
+.logarea{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.log-toolbar{padding:8px 14px;border-bottom:1px solid #1e2535;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.log-toolbar span{font-size:12px;color:#a0aec0;flex:1}
+.filter-btns{display:flex;gap:4px}
+.fbtn{padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.fbtn.active{border-color:currentColor}
+.fbtn.all{color:#a0aec0}.fbtn.all.active{background:#2d3748}
+.fbtn.recv{color:#68d391}.fbtn.recv.active{background:#1a3a2a}
+.fbtn.sent{color:#90cdf4}.fbtn.sent.active{background:#1a2b4a}
+.fbtn.sys{color:#f6ad55}.fbtn.sys.active{background:#3a2a0a}
+.fbtn.err{color:#fc8181}.fbtn.err.active{background:#3a1a1a}
+
+#log{flex:1;overflow-y:auto;padding:10px 14px;font-family:monospace;font-size:12px;line-height:1.7}
+.log-entry{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03);align-items:flex-start}
+.log-entry:last-child{border:none}
+.log-time{color:#4a5568;flex-shrink:0;width:84px}
+.log-tag{flex-shrink:0;width:40px;text-align:center;padding:1px 4px;border-radius:3px;font-size:10px;font-weight:700}
+.tag-recv{background:#1a3a2a;color:#68d391}
+.tag-sent{background:#1a2b4a;color:#90cdf4}
+.tag-sys{background:#3a2a0a;color:#f6ad55}
+.tag-err{background:#3a1a1a;color:#fc8181}
+.log-body{flex:1;word-break:break-all;color:#cbd5e0}
+.log-body .topic{color:#f6ad55}
+.log-body .seq{color:#b794f4;margin-right:4px}
+.log-body .from{color:#90cdf4}
+.log-body .payload{color:#68d391}
+.log-body pre{background:#0d1117;padding:6px 8px;border-radius:4px;margin-top:3px;overflow-x:auto;font-size:11px;color:#a0aec0}
+
+.empty-log{text-align:center;color:#4a5568;padding:60px 0;font-size:14px}
+
+/* stats bar */
+.stats{padding:6px 14px;border-top:1px solid #1e2535;display:flex;gap:16px;font-size:11px;color:#4a5568;flex-shrink:0}
+.stats span b{color:#a0aec0}
+
+/* 在线客户端浮层 */
+.clients-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
+.clients-modal.show{display:flex}
+.clients-box{background:#1a2035;border:1px solid #2d3748;border-radius:10px;width:520px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden}
+.clients-head{padding:14px 18px;border-bottom:1px solid #2d3748;display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:14px}
+.clients-body{overflow-y:auto;padding:12px}
+.client-card{background:#0f1117;border:1px solid #2d3748;border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:12px}
+.client-card .cid{color:#a0aec0;font-family:monospace}
+.client-card .cdid{color:#90cdf4;font-weight:700;font-size:13px}
+.client-card .ptags{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
+.ptag{background:#1a2b4a;color:#90cdf4;padding:2px 8px;border-radius:3px;font-family:monospace;font-size:11px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔌 Hub 消息调试面板</h1>
+  <div class="conn-bar">
+    <div class="dot" id="dot"></div>
+    <span id="connLabel">未连接</span>
+    <button class="btn btn-ghost btn-sm" onclick="showClients()">在线设备</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- ── 左侧控制区 ── -->
+  <div class="sidebar">
+
+    <!-- 连接设置 -->
+    <div class="panel">
+      <div class="panel-title">🔗 连接设置</div>
+      <label>服务器地址</label>
+      <input id="serverUrl" value="" placeholder="ws://host:7860">
+      <div class="form-gap">
+        <label>Device ID</label>
+        <input id="deviceId" value="" placeholder="dev-debug-001">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary" id="btnConnect" onclick="wsConnect()">连接 WS</button>
+        <button class="btn btn-danger" id="btnDisconnect" onclick="wsDisconnect()" disabled>断开</button>
+      </div>
+    </div>
+
+    <!-- 订阅 -->
+    <div class="panel">
+      <div class="panel-title">📥 订阅 Topic</div>
+      <label>Topic Pattern（支持 + 和 # 通配）</label>
+      <div class="row">
+        <input id="subTopic" placeholder="room1/+  或  #" onkeydown="if(event.key==='Enter')wsSub()">
+        <button class="btn btn-success btn-sm" onclick="wsSub()">订阅 WS</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input id="httpSubTopic" placeholder="HTTP 长轮询 topic" onkeydown="if(event.key==='Enter')httpSubStart()">
+        <button class="btn btn-ghost btn-sm" onclick="httpSubStart()">订阅 HTTP</button>
+      </div>
+    </div>
+
+    <!-- 已订阅列表 -->
+    <div class="panel-title" style="padding:10px 14px 0;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#667eea">已订阅</div>
+    <div class="sub-list" id="subList">
+      <div style="text-align:center;color:#4a5568;padding:20px 0;font-size:12px">暂无订阅</div>
+    </div>
+
+    <!-- 发布 -->
+    <div class="panel" style="flex-shrink:0">
+      <div class="panel-title">📤 发布消息</div>
+      <label>Topic</label>
+      <input id="pubTopic" placeholder="room1/temp">
+      <div class="form-gap">
+        <label>Payload（JSON）</label>
+        <textarea id="pubPayload" placeholder='{"value": 23.5, "unit": "°C"}'></textarea>
+      </div>
+      <div class="ttl-row">
+        <label>TTL（秒）</label>
+        <input id="pubTTL" type="number" value="300" min="1" max="86400">
+        <label>协议</label>
+        <select id="pubProto" style="flex:1">
+          <option value="ws">WebSocket</option>
+          <option value="http">HTTP POST</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary" style="flex:1" onclick="publish()">发布</button>
+        <button class="btn btn-ghost btn-sm" onclick="fillDemo()">示例</button>
+      </div>
+    </div>
+
+    <!-- 拉取历史 -->
+    <div class="panel" style="flex-shrink:0">
+      <div class="panel-title">📚 拉取历史</div>
+      <label>Topic Pattern</label>
+      <div class="row">
+        <input id="historyTopic" placeholder="room1/+">
+        <button class="btn btn-ghost btn-sm" onclick="fetchHistory()">拉取</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── 右侧日志区 ── -->
+  <div class="logarea">
+    <div class="log-toolbar">
+      <span id="logCount">0 条消息</span>
+      <div class="filter-btns">
+        <div class="fbtn all active" onclick="setFilter('all',this)">全部</div>
+        <div class="fbtn recv" onclick="setFilter('recv',this)">收到</div>
+        <div class="fbtn sent" onclick="setFilter('sent',this)">发送</div>
+        <div class="fbtn sys" onclick="setFilter('sys',this)">系统</div>
+        <div class="fbtn err" onclick="setFilter('err',this)">错误</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="clearLog()">清空</button>
+    </div>
+    <div id="log"><div class="empty-log">📭 暂无日志<br><small style="color:#2d3748">连接后订阅 topic，消息将在此显示</small></div></div>
+    <div class="stats">
+      <span>收到 <b id="statRecv">0</b></span>
+      <span>发送 <b id="statSent">0</b></span>
+      <span>最后收到 <b id="statLastSeq">-</b></span>
+      <span>HTTP 轮询 <b id="statPoll">0</b></span>
+    </div>
+  </div>
+</div>
+
+<!-- 在线设备弹窗 -->
+<div class="clients-modal" id="clientsModal" onclick="if(event.target===this)closeClients()">
+  <div class="clients-box">
+    <div class="clients-head">
+      <span>🖥️ 在线 WS 设备</span>
+      <button class="btn btn-ghost btn-sm" onclick="closeClients()">✕</button>
+    </div>
+    <div class="clients-body" id="clientsBody">加载中...</div>
+  </div>
+</div>
+
+<script>
+// ── 状态 ──────────────────────────────────────────────────────────────────────
+var ws = null;
+var wsReconnTimer = null;
+var subscriptions = {}; // pattern → {proto:'ws'|'http', afterSeq, polling}
+var stats = {recv:0, sent:0, lastSeq:0, poll:0};
+var logFilter = 'all';
+var logEntries = []; // {type, time, body}
+var currentSeq = 0;
+
+// ── 初始化：自动填写当前服务器地址 ───────────────────────────────────────────
+window.addEventListener('load', function(){
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  document.getElementById('serverUrl').value = proto + '//' + location.host;
+  document.getElementById('deviceId').value = 'debug-' + Math.random().toString(36).slice(2,7);
+});
+
+// ── WS 连接 ───────────────────────────────────────────────────────────────────
+function wsConnect(){
+  var url = document.getElementById('serverUrl').value.trim();
+  var did = document.getElementById('deviceId').value.trim();
+  if(!url || !did){ alert('请填写服务器地址和 Device ID'); return; }
+
+  setDot('connecting', '连接中...');
+  var wsUrl = url.replace(/^http/,'ws') + '/hub/ws?device_id=' + encodeURIComponent(did);
+
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = function(){
+    setDot('on', '已连接 · WS · ' + did);
+    document.getElementById('btnConnect').disabled = true;
+    document.getElementById('btnDisconnect').disabled = false;
+    log('sys', '✅ WS 连接成功 → ' + wsUrl);
+    // 重新订阅（重连场景）
+    Object.keys(subscriptions).forEach(function(p){
+      if(subscriptions[p].proto === 'ws') wsSendSub(p);
+    });
+  };
+
+  ws.onmessage = function(e){
+    try {
+      var msg = JSON.parse(e.data);
+      handleIncoming(msg);
+    } catch(ex) {
+      log('err', '消息解析失败: ' + e.data);
+    }
+  };
+
+  ws.onclose = function(e){
+    setDot('off', '已断开');
+    document.getElementById('btnConnect').disabled = false;
+    document.getElementById('btnDisconnect').disabled = true;
+    log('sys', '🔌 WS 断开 code=' + e.code + (e.reason?' reason='+e.reason:''));
+  };
+
+  ws.onerror = function(){
+    log('err', '❌ WS 连接错误');
+    ws.close();
+  };
+}
+
+function wsDisconnect(){
+  if(ws) ws.close(1000, 'user disconnect');
+  ws = null;
+}
+
+function setDot(state, label){
+  var d = document.getElementById('dot');
+  d.className = 'dot' + (state==='on'?' on':state==='connecting'?' connecting':'');
+  document.getElementById('connLabel').textContent = label;
+}
+
+// ── 收到消息处理 ──────────────────────────────────────────────────────────────
+function handleIncoming(msg){
+  // 系统 ack 帧
+  if(msg.action){
+    var txt = msg.action + (msg.topic?' topic='+msg.topic:'') + (msg.info?' ('+msg.info+')':'');
+    log('sys', '↩ ' + txt);
+    return;
+  }
+  // 普通消息帧（含 seq）
+  if(msg.seq !== undefined){
+    stats.recv++;
+    stats.lastSeq = msg.seq;
+    document.getElementById('statRecv').textContent = stats.recv;
+    document.getElementById('statLastSeq').textContent = msg.seq;
+    var age = msg.expire_at ? Math.round((msg.expire_at - Date.now())/1000) + 's 后过期' : '';
+    var bodyHtml =
+      '<span class="seq">#'+msg.seq+'</span>' +
+      '<span class="topic">'+escHtml(msg.topic)+'</span>' +
+      (msg.from?' <span class="from">from:'+escHtml(msg.from)+'</span>':'') +
+      (age?' <span style="color:#4a5568;font-size:10px">'+age+'</span>':'') +
+      '<pre>'+escHtml(fmtJSON(msg.payload))+'</pre>';
+    log('recv', bodyHtml, true);
+    return;
+  }
+  // 其他（pong等）
+  log('sys', JSON.stringify(msg));
+}
+
+// ── WS 订阅 ───────────────────────────────────────────────────────────────────
+// seqCache 保留每个 pattern 的游标，退订后重订可继续接收
+var seqCache = {};
+
+function wsSub(){
+  var p = document.getElementById('subTopic').value.trim();
+  if(!p){ alert('请填写 topic'); return; }
+  if(!ws || ws.readyState !== WebSocket.OPEN){ alert('请先连接 WS'); return; }
+  if(subscriptions[p] && subscriptions[p].proto === 'ws'){
+    log('sys', '已订阅(WS): '+p); return;
+  }
+  subscriptions[p] = {proto:'ws'};
+  wsSendSub(p);
+  updateSubList();
+  document.getElementById('subTopic').value = '';
+}
+
+function wsSendSub(pattern){
+  send({action:'sub', topic:pattern});
+}
+
+function wsUnsub(pattern){
+  if(ws && ws.readyState === WebSocket.OPEN){
+    send({action:'unsub', topic:pattern});
+  }
+  // 保留 seqCache，不影响其他 pattern
+  delete subscriptions[pattern];
+  updateSubList();
+  log('sys', '退订 WS: ' + pattern);
+}
+
+// ── HTTP 长轮询订阅 ───────────────────────────────────────────────────────────
+function httpSubStart(){
+  var p = document.getElementById('httpSubTopic').value.trim();
+  if(!p){ alert('请填写 topic'); return; }
+  if(subscriptions[p] && subscriptions[p].active){
+    log('sys', '已订阅(HTTP): '+p); return;
+  }
+  // 重新订阅时从上次游标继续，避免重复收取
+  var afterSeq = seqCache[p] || 0;
+  subscriptions[p] = {proto:'http', afterSeq:afterSeq, active:true};
+  updateSubList();
+  document.getElementById('httpSubTopic').value = '';
+  httpPoll(p);
+}
+
+function httpPoll(pattern){
+  var sub = subscriptions[pattern];
+  if(!sub || !sub.active) return;
+
+  stats.poll++;
+  document.getElementById('statPoll').textContent = stats.poll;
+
+  var did = document.getElementById('deviceId').value.trim() || 'debug';
+  var url = '/hub/sub?topic='+encodeURIComponent(pattern)
+    +'&device_id='+encodeURIComponent(did)
+    +'&after_seq='+sub.afterSeq
+    +'&timeout=25';
+
+  fetch(url).then(function(r){ return r.json(); }).then(function(data){
+    if(!subscriptions[pattern] || !subscriptions[pattern].active) return;
+    if(data.messages && data.messages.length > 0){
+      data.messages.forEach(function(msg){ handleIncoming(msg); });
+      subscriptions[pattern].afterSeq = data.next_seq;
+      seqCache[pattern] = data.next_seq; // 同步到缓存
+    }
+    // 立即发起下一次轮询
+    httpPoll(pattern);
+  }).catch(function(err){
+    if(!subscriptions[pattern] || !subscriptions[pattern].active) return;
+    log('err', 'HTTP 轮询失败: ' + err.message);
+    setTimeout(function(){ httpPoll(pattern); }, 3000);
+  });
+}
+
+function httpUnsub(pattern){
+  if(subscriptions[pattern]){
+    // 保存当前游标到 seqCache
+    seqCache[pattern] = subscriptions[pattern].afterSeq || 0;
+    subscriptions[pattern].active = false;
+  }
+  delete subscriptions[pattern];
+  updateSubList();
+  log('sys', '停止 HTTP 轮询: ' + pattern + '（游标已保存 seq=' + (seqCache[pattern]||0) + '）');
+}
+
+// ── 更新订阅列表显示 ──────────────────────────────────────────────────────────
+function updateSubList(){
+  var list = document.getElementById('subList');
+  var keys = Object.keys(subscriptions);
+  if(keys.length === 0){
+    list.innerHTML = '<div style="text-align:center;color:#4a5568;padding:20px 0;font-size:12px">暂无订阅</div>';
+    return;
+  }
+  list.innerHTML = keys.map(function(p){
+    var s = subscriptions[p];
+    var proto = s.proto === 'ws' ? '<span class="sub-proto ws">WS</span>' : '<span class="sub-proto http">HTTP</span>';
+    var seq = s.proto === 'http' ? '<span style="color:#4a5568;font-size:10px;margin-left:4px">seq:'+s.afterSeq+'</span>' : '';
+    var unsub = s.proto === 'ws'
+      ? 'onclick="wsUnsub(\''+escAttr(p)+'\')"'
+      : 'onclick="httpUnsub(\''+escAttr(p)+'\')"';
+    return '<div class="sub-item">'
+      + '<span><span class="sub-pattern">'+escHtml(p)+'</span>'+proto+seq+'</span>'
+      + '<button class="btn btn-danger btn-sm" '+unsub+'>退订</button>'
+      + '</div>';
+  }).join('');
+}
+
+// ── 发布消息 ──────────────────────────────────────────────────────────────────
+function publish(){
+  var topic = document.getElementById('pubTopic').value.trim();
+  var payloadStr = document.getElementById('pubPayload').value.trim();
+  var ttl = parseInt(document.getElementById('pubTTL').value) || 300;
+  var proto = document.getElementById('pubProto').value;
+  var did = document.getElementById('deviceId').value.trim() || 'debug';
+
+  if(!topic){ alert('请填写 topic'); return; }
+  if(!payloadStr){ payloadStr = 'null'; }
+
+  var payload;
+  try { payload = JSON.parse(payloadStr); }
+  catch(e){ alert('Payload 不是合法 JSON:\n' + e.message); return; }
+
+  if(proto === 'ws'){
+    if(!ws || ws.readyState !== WebSocket.OPEN){ alert('WS 未连接'); return; }
+    send({action:'pub', topic:topic, payload:payload, ttl:ttl});
+    stats.sent++;
+    document.getElementById('statSent').textContent = stats.sent;
+    log('sent', '<span class="topic">'+escHtml(topic)+'</span> ttl='+ttl+'s<pre>'+escHtml(fmtJSON(payload))+'</pre>', true);
+  } else {
+    var body = JSON.stringify({topic:topic, device_id:did, payload:payload, ttl:ttl});
+    fetch('/hub/pub',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
+      .then(function(r){return r.json();}).then(function(data){
+        stats.sent++;
+        document.getElementById('statSent').textContent = stats.sent;
+        if(data.ok){
+          log('sent', '<span class="topic">'+escHtml(topic)+'</span> HTTP POST → seq='+data.seq+' ttl='+ttl+'s<pre>'+escHtml(fmtJSON(payload))+'</pre>', true);
+        } else {
+          log('err', 'HTTP 发布失败: ' + JSON.stringify(data));
+        }
+      }).catch(function(e){ log('err', 'HTTP 发布出错: ' + e.message); });
+  }
+}
+
+// ── 拉取历史 ──────────────────────────────────────────────────────────────────
+function fetchHistory(){
+  var pattern = document.getElementById('historyTopic').value.trim();
+  if(!pattern){ alert('请填写 topic'); return; }
+  fetch('/hub/history?topic='+encodeURIComponent(pattern)+'&after_seq=0')
+    .then(function(r){return r.json();}).then(function(data){
+      if(!data.messages || data.messages.length === 0){
+        log('sys', '📚 历史查询 ['+pattern+'] 无消息');
+        return;
+      }
+      log('sys', '📚 历史查询 ['+pattern+'] 共 '+data.messages.length+' 条：');
+      data.messages.forEach(function(msg){ handleIncoming(msg); });
+    }).catch(function(e){ log('err', '拉取历史失败: ' + e.message); });
+}
+
+// ── 在线设备 ──────────────────────────────────────────────────────────────────
+function showClients(){
+  document.getElementById('clientsModal').classList.add('show');
+  fetch('/hub/clients').then(function(r){return r.json();}).then(function(data){
+    var body = document.getElementById('clientsBody');
+    if(!data.ok){ body.innerHTML='<div style="color:#fc8181">'+data.error+'</div>'; return; }
+    if(!data.clients || data.clients.length===0){
+      body.innerHTML='<div style="color:#4a5568;text-align:center;padding:30px">暂无在线 WS 设备</div>';
+      return;
+    }
+    body.innerHTML = '<div style="color:#a0aec0;font-size:12px;margin-bottom:10px">共 '+data.count+' 台在线</div>'
+      + data.clients.map(function(c){
+          var ptags = (c.patterns||[]).map(function(p){
+            return '<span class="ptag">'+escHtml(p)+'</span>';
+          }).join('');
+          return '<div class="client-card">'
+            +'<div class="cdid">'+escHtml(c.device_id)+'</div>'
+            +'<div class="cid">id: '+escHtml(c.id)+'</div>'
+            +(ptags?'<div class="ptags">'+ptags+'</div>':'<div style="color:#4a5568;font-size:11px;margin-top:4px">未订阅任何 topic</div>')
+            +'</div>';
+        }).join('');
+  }).catch(function(e){
+    document.getElementById('clientsBody').innerHTML='<div style="color:#fc8181">请求失败：'+e.message+'<br><small>（需要管理员登录后访问）</small></div>';
+  });
+}
+
+function closeClients(){
+  document.getElementById('clientsModal').classList.remove('show');
+}
+
+// ── 日志 ──────────────────────────────────────────────────────────────────────
+function log(type, bodyHtml, isHtml){
+  var now = new Date();
+  var ts = now.getHours().toString().padStart(2,'0')+':'
+    +now.getMinutes().toString().padStart(2,'0')+':'
+    +now.getSeconds().toString().padStart(2,'0')+'.'
+    +now.getMilliseconds().toString().padStart(3,'0');
+
+  logEntries.push({type:type, time:ts, body:bodyHtml, isHtml:!!isHtml});
+
+  var count = logEntries.length;
+  document.getElementById('logCount').textContent = count + ' 条消息';
+
+  if(logFilter === 'all' || logFilter === type){
+    appendLogEntry({type:type, time:ts, body:bodyHtml, isHtml:!!isHtml});
+  }
+}
+
+function appendLogEntry(entry){
+  var logEl = document.getElementById('log');
+  // 移除空提示
+  var empty = logEl.querySelector('.empty-log');
+  if(empty) logEl.removeChild(empty);
+
+  var tagClass = {recv:'tag-recv',sent:'tag-sent',sys:'tag-sys',err:'tag-err'}[entry.type]||'tag-sys';
+  var tagText = {recv:'收到',sent:'发送',sys:'系统',err:'错误'}[entry.type]||entry.type;
+
+  var div = document.createElement('div');
+  div.className = 'log-entry';
+  div.dataset.type = entry.type;
+  div.innerHTML =
+    '<span class="log-time">'+entry.time+'</span>'
+    +'<span class="log-tag '+tagClass+'">'+tagText+'</span>'
+    +'<span class="log-body">'+(entry.isHtml?entry.body:escHtml(entry.body))+'</span>';
+  logEl.appendChild(div);
+
+  // 自动滚动到底部
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setFilter(f, el){
+  logFilter = f;
+  document.querySelectorAll('.fbtn').forEach(function(b){ b.classList.remove('active'); });
+  el.classList.add('active');
+  renderLog();
+}
+
+function renderLog(){
+  var logEl = document.getElementById('log');
+  logEl.innerHTML = '';
+  var filtered = logFilter==='all' ? logEntries : logEntries.filter(function(e){ return e.type===logFilter; });
+  if(filtered.length === 0){
+    logEl.innerHTML = '<div class="empty-log">📭 此分类暂无日志</div>';
+    return;
+  }
+  filtered.forEach(appendLogEntry);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog(){
+  logEntries = [];
+  stats = {recv:0, sent:0, lastSeq:0, poll:0};
+  document.getElementById('statRecv').textContent = '0';
+  document.getElementById('statSent').textContent = '0';
+  document.getElementById('statLastSeq').textContent = '-';
+  document.getElementById('statPoll').textContent = '0';
+  document.getElementById('logCount').textContent = '0 条消息';
+  document.getElementById('log').innerHTML = '<div class="empty-log">📭 日志已清空</div>';
+}
+
+// ── 工具 ──────────────────────────────────────────────────────────────────────
+function send(obj){
+  if(ws && ws.readyState === WebSocket.OPEN){
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+function fmtJSON(v){
+  try{
+    if(typeof v === 'string') return JSON.stringify(JSON.parse(v), null, 2);
+    return JSON.stringify(v, null, 2);
+  } catch(e){ return String(v); }
+}
+
+function escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s){
+  return String(s).replace(/'/g,"\\'");
+}
+
+function fillDemo(){
+  document.getElementById('pubTopic').value = 'room1/temp';
+  document.getElementById('pubPayload').value = JSON.stringify({value:+(Math.random()*10+20).toFixed(1),unit:'°C',sensor:'dht22'}, null, 2);
+  document.getElementById('pubTTL').value = '300';
+}
+</script>
+</body>
+</html>
