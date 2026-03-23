@@ -89,52 +89,26 @@ jobs:
       #   - cut-off 设为 1 秒前，确保刚推送的新层不会被误删；
       #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
       # -------------------------------------------------------------------------
-      - name: Delete old Docker image versions (keep latest ${{ env.KEEP_VERSIONS }})
-        if: github.event_name != 'pull_request'
-        uses: snok/container-retention-policy@v3.0.0
-        with:
-          account: ${{ github.repository_owner }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          image-names: claw_host
-          image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
-          cut-off: 1sec                   # v3.x 格式：数字+单位，如 1sec / 1min / 1h
-          keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
-
-      # -------------------------------------------------------------------------
-      # 清理旧 GitHub Release：只保留最近 KEEP_RELEASES 个 Release。
-      # 使用 dev-drprasad/delete-older-releases Action：
-      #   - keep_latest 控制保留数量，其余旧版本自动删除；
-      #   - delete_tags 设为 true，同步删除对应的 Git Tag，保持仓库整洁；
-      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
-      # -------------------------------------------------------------------------
-      - name: Delete old GitHub Releases (keep latest ${{ env.KEEP_RELEASES }})
-        if: github.event_name != 'pull_request'
-        uses: dev-drprasad/delete-older-releases@master
-        with:
-          keep_latest: ${{ env.KEEP_RELEASES }}
-          delete_tags: true               # 同步删除对应的 Git Tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # -------------------------------------------------------------------------
-      # 清理旧 Workflow 运行记录：只保留最近 KEEP_WORKFLOWS 条运行历史。
-      # 使用 Mattraks/delete-workflow-runs Action：
-      #   - retain_days 设为 0，不按天数过滤，完全由 keep_minimum_runs 控制数量；
-      #   - keep_minimum_runs 控制每个 Workflow 保留的最少运行记录数；
-      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
-      # -------------------------------------------------------------------------
-      - name: Delete old Workflow runs (keep latest ${{ env.KEEP_WORKFLOWS }})
-        if: github.event_name != 'pull_request'
+      - name: Clean Old Data
+        run: |
+          echo "----------开始清空旧的固件和数据------------"   
+          
+      - name: Delete Old Workflows
         uses: Mattraks/delete-workflow-runs@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          retain_days: 0                  # 不按天数限制，仅按条数保留
-          keep_minimum_runs: ${{ env.KEEP_WORKFLOWS }}
+          retain_days: 7
+          keep_minimum_runs: 0
 
-      # -------------------------------------------------------------------------
-      # 收尾提示：所有构建与清理步骤完成后输出结束标记，方便在日志中快速定位。
-      # -------------------------------------------------------------------------
+
+      - name: Delete Old Releases
+        uses: dev-drprasad/delete-older-releases@master
+        with:
+          keep_latest: 15
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Done
         run: |
-          echo "----------数据清除完毕.------------"
+          echo "----------数据清除完毕.------------"  
