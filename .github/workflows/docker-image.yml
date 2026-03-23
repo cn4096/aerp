@@ -18,9 +18,8 @@ on:
 # KEEP_WORKFLOWS - 保留最近多少条 Workflow 运行记录
 # -------------------------------------------------------------------------
 env:
-  KEEP_VERSIONS: 5
   KEEP_RELEASES: 5
-  KEEP_WORKFLOWS: 10
+  KEEP_WORKFLOWS_DAYS: 7
 
 jobs:
   build:
@@ -97,14 +96,14 @@ jobs:
         uses: Mattraks/delete-workflow-runs@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          retain_days: 7
+          retain_days: ${{ env.KEEP_WORKFLOWS_DAYS }}
           keep_minimum_runs: 0
 
 
       - name: Delete Old Releases
         uses: dev-drprasad/delete-older-releases@master
         with:
-          keep_latest: 15
+          keep_latest: ${{ env.KEEP_RELEASES }}
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
