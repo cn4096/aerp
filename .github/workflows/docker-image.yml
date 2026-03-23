@@ -11,14 +11,49 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# -------------------------------------------------------------------------
+# 全局参数配置：在此处统一管理保留数量，方便后续调整。
+# KEEP_VERSIONS  - 保留最近多少个 Docker 镜像版本（untagged 历史层）
+# KEEP_RELEASES  - 保留最近多少个 GitHub Release
+# KEEP_WORKFLOWS - 保留最近多少条 Workflow 运行记录
+# -------------------------------------------------------------------------
+env:
+  KEEP_VERSIONS: 5
+  KEEP_RELEASES: 5
+  KEEP_WORKFLOWS: 10
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write
+      contents: write      # 删除 Release 需要 write 权限
+      packages: write      # 推送/删除 GHCR 镜像需要 write 权限
+      actions: write       # 删除 Workflow 运行记录需要 write 权限
 
     steps:
+      # -------------------------------------------------------------------------
+      # 服务器性能检测：在构建开始前，输出当前 Runner 的 CPU、内存、硬盘信息。
+      # 方便判断当前分配到的机器性能，及时调整构建策略（如减少并行任务）。
+      # 同时验证 GITHUB_TOKEN 是否正常注入，并提示即将开始清理旧数据。
+      # -------------------------------------------------------------------------
+      - name: Check Server Performance
+        run: |
+          echo "警告⚠"
+          echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+          echo -e "已知CPU型号(降序): 7763，8370C，8272CL，8171M，E5-2673\n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+          echo "CPU核心数量: $(nproc)"
+          echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息:"
+          echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+          echo "-------------------------Tokens Ready----------------------"
+          echo "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
+          echo "----------开始清空旧的数据------------"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -46,3 +81,53 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # -------------------------------------------------------------------------
+      # 清理旧 Docker 镜像版本：推送新镜像后，只保留最近 KEEP_VERSIONS 个版本。
+      # 使用 snok/container-retention-policy Action：
+      #   - 仅删除 untagged（无标签）的旧版本历史层，带 tag 的版本不受影响；
+      #   - cut-off 设为 1 秒前，确保刚推送的新层不会被误删；
+      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
+      # -------------------------------------------------------------------------
+      - name: Delete old Docker image versions (keep latest ${{ env.KEEP_VERSIONS }})
+        if: github.event_name != 'pull_request'
+        uses: snok/container-retention-policy@v3.0.0
+        with:
+          account: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: claw_host
+          image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
+          cut-off: 1 second ago UTC
+          keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
+
+      # -------------------------------------------------------------------------
+      # 清理旧 GitHub Release：只保留最近 KEEP_RELEASES 个 Release。
+      # 使用 dev-drprasad/delete-older-releases Action：
+      #   - keep_latest 控制保留数量，其余旧版本自动删除；
+      #   - delete_tags 设为 true，同步删除对应的 Git Tag，保持仓库整洁；
+      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
+      # -------------------------------------------------------------------------
+      - name: Delete old GitHub Releases (keep latest ${{ env.KEEP_RELEASES }})
+        if: github.event_name != 'pull_request'
+        uses: dev-drprasad/delete-older-releases@master
+        with:
+          keep_latest: ${{ env.KEEP_RELEASES }}
+          delete_tags: true               # 同步删除对应的 Git Tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------------------------------------------------------
+      # 清理旧 Workflow 运行记录：只保留最近 KEEP_WORKFLOWS 条运行历史。
+      # 使用 Mattraks/delete-workflow-runs Action：
+      #   - retain_days 设为 0，不按天数过滤，完全由 keep_minimum_runs 控制数量；
+      #   - keep_minimum_runs 控制每个 Workflow 保留的最少运行记录数；
+      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
+      # -------------------------------------------------------------------------
+      - name: Delete old Workflow runs (keep latest ${{ env.KEEP_WORKFLOWS }})
+        if: github.event_name != 'pull_request'
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0                  # 不按天数限制，仅按条数保留
+          keep_minimum_runs: ${{ env.KEEP_WORKFLOWS }}
