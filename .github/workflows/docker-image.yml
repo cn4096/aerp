@@ -110,9 +110,8 @@ jobs:
         #   3. 将生成的 token 保存为仓库 secret，命名为 PAT
         uses: snok/container-retention-policy@v3.0.0
         with:
-          account: ${{ github.repository_owner }}
+          account: user               # 个人账号固定填 user（不是用户名！），组织账号才填组织名
           token: ${{ secrets.PAT }}       # 必须用 PAT，GITHUB_TOKEN 无 delete:packages 权限
-          account-type: personal          # cn4096 是个人账号填 personal，组织账号填 org
           image-names: claw_host
           image-tags: "!latest"           # 排除 latest 标签，只清理 untagged 旧版本
           cut-off: 2h                     # 删除 2 小时前的旧版本，保护刚推送的新层
