@@ -20,7 +20,7 @@ on:
 env:
   KEEP_VERSIONS: 5
   KEEP_RELEASES: 5
-  KEEP_WORKFLOWS_DAYS: 7
+  KEEP_WORKFLOWS_DAYS: 1
 
 jobs:
   build:
