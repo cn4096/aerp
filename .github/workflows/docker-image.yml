@@ -18,6 +18,7 @@ on:
 # KEEP_WORKFLOWS - 保留最近多少条 Workflow 运行记录
 # -------------------------------------------------------------------------
 env:
+  KEEP_VERSIONS: 5
   KEEP_RELEASES: 5
   KEEP_WORKFLOWS_DAYS: 7
 
@@ -91,6 +92,23 @@ jobs:
       - name: Clean Old Data
         run: |
           echo "----------开始清空旧的固件和数据------------"   
+      # -------------------------------------------------------------------------
+      # 清理旧 Docker 镜像版本：推送新镜像后，只保留最近 KEEP_VERSIONS 个版本。
+      # 使用 snok/container-retention-policy Action：
+      #   - 仅删除 untagged（无标签）的旧版本历史层，带 tag 的版本不受影响；
+      #   - cut-off 设为 1 秒前，确保刚推送的新层不会被误删；
+      #   - 仅在推送到 main 分支时执行，PR 触发时跳过。
+      # -------------------------------------------------------------------------
+      - name: Delete old Docker image versions (keep latest ${{ env.KEEP_VERSIONS }})
+        if: github.event_name != 'pull_request'
+        uses: snok/container-retention-policy@v2        # v3.0.0 有解析 bug，固定使用 v2 稳定版
+        with:
+          account: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: claw_host
+          image-tags: "!latest"           # 保护带 latest 标签的版本，只清理 untagged
+          cut-off: 1 second ago UTC       # v2 格式：自然语言时间字符串
+          keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
           
       - name: Delete Old Workflows
         uses: Mattraks/delete-workflow-runs@main
