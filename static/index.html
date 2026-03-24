@@ -746,6 +746,7 @@ function renderSidebar() {
     { id: 'dashboard', icon: '📊', label: '仪表盘' },
     { section: '通讯' },
     { id: 'chat', icon: '💬', label: '聊天' },
+    { id: 'email', icon: '📧', label: '电子邮件' },
     { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
     { section: '业务' },
     { id: 'products',   icon: '📦', label: '产品管理',  perm: 'products' },
@@ -822,7 +823,7 @@ function getPageTitle() {
     customers: '客户管理', quotations: '报价系统', contracts: '合同管理',
     finance: '财务管理', bank: '银行流水-现金流', users: '员工管理', templates: '合同模板',
     reports: '报表中心', datacenter: '数据中心',
-    chat: '聊天', sharefiles: '企业网盘',
+    chat: '聊天', email: '电子邮件', sharefiles: '企业网盘',
     sysadmin: '系统设置',
   };
   return titles[state.page] || '';
@@ -894,7 +895,7 @@ function closeModal() {
 function attachEvents() {
   // Navigation
   document.querySelectorAll('.nav-item[data-page]').forEach(el => {
-    el.addEventListener('click', () => { state.page = el.dataset.page; render(); loadPage(); });
+    el.addEventListener('click', () => { state.page = el.dataset.page; render(); });
   });
 
   // User profile dialog
@@ -957,7 +958,12 @@ async function doLogin() {
     state.user = { user_id: data.user_id, username: data.username, full_name: data.full_name, is_admin: data.is_admin, perms: data.perms };
     localStorage.setItem('erp_token', state.token);
     localStorage.setItem('erp_user', JSON.stringify(state.user));
-    loadSiteSettings().then(() => { render(); loadPage(); });
+    loadSiteSettings().then(() => {
+      render();
+      loadPage();
+      // 登录后启动慢速后台收信（2秒后，等页面初始化完成）
+      setTimeout(() => { if (typeof emailSlowSyncTimer === 'function') emailSlowSyncTimer(); }, 2000);
+    });
   } catch (e) { showAuthError(e.message); }
 }
 
@@ -1057,6 +1063,9 @@ async function loadPage() {
   const actions = document.getElementById('topbar-actions');
   if (!content) return;
 
+  // 离开邮件页面：切换到慢速后台同步（240秒）；进入邮件页面会在 loadEmail 里切回快速
+  if (state.page !== 'email' && typeof emailSlowSyncTimer === 'function') emailSlowSyncTimer();
+
   // 记住最后访问的页面
   localStorage.setItem('erp_last_page', state.page);
   try {
@@ -1078,7 +1087,7 @@ async function loadPage() {
           el.addEventListener('click', () => {
             state.page = el.dataset.page;
             if (window.innerWidth <= 768) closeSidebar();
-            render(); loadPage();
+            render();
           });
         });
         const btnUserProfileInner = document.getElementById('btn-user-profile');
@@ -1137,6 +1146,7 @@ async function loadPage() {
       case 'datacenter': await loadDataCenter(content, actions); break;
       case 'users': await loadUsers(content, actions); break;
       case 'templates': await loadTemplates(content, actions); break;
+      case 'email':    await loadEmail(content, actions); break;
       case 'sysadmin': await loadSysAdmin(content, actions); break;
       case 'chat': await loadChat(content, actions); break;
       case 'sharefiles': await loadShareFiles(content, actions); break;
@@ -2525,8 +2535,20 @@ function openCustomerViewModal(customer) {
             <span class="btn btn-sm" style="pointer-events:none">＋ 上传附件</span>
           </label>
         </div>
-        <div id="cv-attachments" style="min-height:36px">
-          <div style="color:var(--text3);font-size:13px">加载中…</div>
+        <!-- 拖拽上传区域 -->
+        <div id="cv-drop-zone" data-custid="${c.id}"
+          ondragover="cvDragOver(event)"
+          ondragleave="cvDragLeave(event)"
+          ondrop="cvDrop(event)"
+          style="border:2px dashed var(--border);border-radius:8px;padding:10px;
+                 transition:border-color .15s,background .15s;min-height:36px">
+          <div id="cv-attachments" style="min-height:36px">
+            <div style="color:var(--text3);font-size:13px">加载中…</div>
+          </div>
+          <div id="cv-drop-hint" style="display:none;text-align:center;padding:12px 0;
+               color:var(--accent);font-size:13px;pointer-events:none">
+            📎 松开鼠标上传附件
+          </div>
         </div>
       </div>
     </div>
@@ -2605,6 +2627,39 @@ async function cvLoadAttachments(custId) {
     const wrap2 = document.getElementById('cv-attachments');
     if (wrap2) wrap2.innerHTML = `<div style="color:var(--red);font-size:13px">加载失败</div>`;
   }
+}
+
+// ── 拖拽上传 ─────────────────────────────────────────────────
+function cvDragOver(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const zone = document.getElementById('cv-drop-zone');
+  const hint = document.getElementById('cv-drop-hint');
+  if (zone) { zone.style.borderColor = 'var(--accent)'; zone.style.background = 'var(--bg3)'; }
+  if (hint) hint.style.display = '';
+}
+
+function cvDragLeave(e) {
+  e.stopPropagation();
+  // 只在真正离开拖拽区时才还原（避免子元素触发 leave）
+  const zone = document.getElementById('cv-drop-zone');
+  if (zone && e.relatedTarget && zone.contains(e.relatedTarget)) return;
+  if (zone) { zone.style.borderColor = ''; zone.style.background = ''; }
+  const hint = document.getElementById('cv-drop-hint');
+  if (hint) hint.style.display = 'none';
+}
+
+function cvDrop(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const zone = document.getElementById('cv-drop-zone');
+  const hint = document.getElementById('cv-drop-hint');
+  if (zone) { zone.style.borderColor = ''; zone.style.background = ''; }
+  if (hint) hint.style.display = 'none';
+  const custId = zone?.dataset?.custid;
+  if (!custId) return;
+  const files = e.dataTransfer?.files;
+  if (files && files.length) cvUploadFiles(parseInt(custId), files);
 }
 
 async function cvUploadFiles(custId, files) {
@@ -5325,7 +5380,7 @@ async function loadReports(content, actions) {
           <div style="display:flex;gap:8px">
             <button class="btn btn-sm" onclick="rptRunQuery()">▶ 运行预览</button>
             <button class="btn btn-sm" onclick="rptSaveAsReport()" title="另存为新报表">📋 另存为</button>
-            <button class="btn btn-sm btn-primary" onclick="rptSaveReport()">💾 保存报表</button>
+            <button class="btn btn-sm btn-primary" onclick="rptSaveReport()">💾 保存</button>
           </div>
         </div>
         <div id="rpt-config-body">
@@ -6117,17 +6172,37 @@ async function rptSaveReport() {
   _rptFlushForm();
   _rptSyncYDefaults();
 
-  const existing = _rptSavedList.find(r => r.id === _rptEditingId);
-  const defName  = existing?.name        || '';
-  const defDesc  = existing?.description || '';
-  const isUpdate = !!_rptEditingId;
+  if (_rptEditingId) {
+    // 已有报表：直接保存，不弹窗
+    await rptDoSaveQuick();
+  } else {
+    // 新报表首次保存：仍需弹窗填写名称和分享设置
+    _rptOpenSaveModal({
+      title: '保存报表', defName: '', defDesc: '',
+      saveLabel: '保存', forceNew: false,
+    });
+  }
+}
 
-  _rptOpenSaveModal({
-    title:   isUpdate ? '更新报表' : '保存报表',
-    defName, defDesc,
-    saveLabel: isUpdate ? '更新' : '保存',
-    forceNew: false,
-  });
+// 直接保存（不弹窗），用于更新已有报表
+async function rptDoSaveQuick() {
+  const existing = _rptSavedList.find(r => r.id === _rptEditingId);
+  const payload = {
+    name:        existing?.name        || '未命名报表',
+    description: existing?.description || '',
+    config:      _rptCloneCfg(),
+  };
+  try {
+    await api('PUT', `/reports/${_rptEditingId}`, payload);
+    // 刷新列表并打开该报表
+    const listRes = await api('GET', '/reports');
+    _rptSavedList = listRes.data || [];
+    _rptRenderSavedList(_rptEditingId);
+    // 打开/刷新当前报表视图
+    await rptLoadSaved(_rptEditingId);
+  } catch(e) {
+    alert('保存失败：' + e.message);
+  }
 }
 
 // ── 另存为新报表 ──────────────────────────────────────────────
@@ -6286,8 +6361,10 @@ async function rptDoSave(forceNew = false) {
 
     const listRes = await api('GET', '/reports');
     _rptSavedList = listRes.data || [];
-    _rptRenderSavedList(_rptEditingId);
+    _rptRenderSavedList(reportId);
     closeModal();
+    // 保存后直接打开该报表
+    await rptLoadSaved(reportId);
   } catch(e) {
     alert('保存失败：' + e.message);
   }
@@ -6369,8 +6446,8 @@ const _DC_LAST_KEY = 'erp_last_dc_table';
 // ── 入口 ─────────────────────────────────────────────────────
 async function loadDataCenter(content, actions) {
   actions.innerHTML = `
-    <button class="btn btn-primary" onclick="dcNewTable()">⊞ 新建数据表</button>
-    <button class="btn" onclick="dcFromExcel()">📥 从Excel创建</button>`;
+    <button class="btn" onclick="dcNewTable()">⊞ 新建数据表</button>
+    <button class="btn btn-primary" onclick="dcFromExcel()">📥 从Excel创建</button>`;
 
   const res = await api('GET', '/dc/tables');
   _dcTables = res.data || [];
@@ -6469,6 +6546,7 @@ async function dcLoadContent() {
         <button class="btn btn-sm" onclick="dcExport()">📤 导出</button>
         <button class="btn btn-sm" onclick="dcManageFormats()">📐 导入格式</button>
         <button class="btn btn-sm" onclick="dcShareTable()">🔗 分享</button>
+        <button class="btn btn-sm" onclick="dcOpenViewConfig()">👁 列设置</button>
         <button class="btn btn-sm" onclick="dcEditTable()">⚙️ 表结构</button>
       </div>
     </div>
@@ -6496,7 +6574,14 @@ async function dcLoadRows() {
   _dcTotal = res.total || 0;
 
   // 更新本地字段定义（可能刚改过）
-  if (res.fields) _dcActiveTable.fields = res.fields;
+  // 注意：保留已有的 visible/order 配置，只更新 name/type/required/unique_key 等结构性属性
+  if (res.fields) {
+    const oldFields = _dcActiveTable.fields || [];
+    _dcActiveTable.fields = res.fields.map(f => {
+      const old = oldFields.find(o => o.id === f.id);
+      return old ? { ...f, visible: old.visible, order: old.order } : f;
+    });
+  }
   dcRenderTable();
   dcRenderPagination();
 }
@@ -6504,10 +6589,215 @@ async function dcLoadRows() {
 function dcSearch() { _dcPage = 1; dcLoadRows(); }
 
 // ── 数据表格渲染 ──────────────────────────────────────────────
+// ── 列视图配置（存表结构，所有用户共享）─────────────────────────────────────
+// visible: bool（默认 true），order: number（默认字段原始顺序）
+// 存在字段定义里，通过 PUT /dc/tables/:id 持久化
+
+// 获取当前表的可见字段列表（按 order 排序，过滤不可见）
+function dcGetVisibleFields() {
+  if (!_dcActiveTable) return [];
+  const fields = (_dcActiveTable.fields || []).filter(f => !f.hidden);
+  return fields
+    .map((f, i) => ({
+      ...f,
+      _visible: f.visible !== false,   // 默认显示
+      _order:   f.order   ?? i,
+    }))
+    .filter(f => f._visible)
+    .sort((a, b) => a._order - b._order);
+}
+
+// ── 列视图设置面板 ────────────────────────────────────────────────────────────
+let _dvDragIdx = null; // 拖拽中的行索引
+
+function dcOpenViewConfig() {
+  if (!_dcActiveTable) return;
+  const tableId = _dcActiveTable.id;
+  const fields = (_dcActiveTable.fields || []).filter(f => !f.hidden);
+
+  // 按字段定义里的 order 排序，_visible 读 visible 属性
+  window._dvCurrentFields = [...fields].map((f, i) => ({
+    ...f,
+    _visible: f.visible !== false,
+    _order:   f.order ?? i,
+  })).sort((a, b) => a._order - b._order);
+
+  dcShowModal(`
+  <div class="modal">
+    <div class="modal-header">👁 列显示设置<span class="modal-close" onclick="dcCloseModal()">×</span></div>
+    <div class="modal-body" style="padding-bottom:4px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;color:var(--text3)">拖动 ☰ 调整顺序，勾选控制显示</span>
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;color:var(--text2)">
+          <input type="checkbox" id="dv-select-all" onchange="dvToggleAll(this.checked)"> 全选
+        </label>
+      </div>
+      <div id="dv-rows"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="dvResetConfig()">恢复默认</button>
+      <button class="btn" onclick="dcCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="dvSaveConfig('${tableId}')">✓ 应用</button>
+    </div>
+  </div>`);
+  dvRenderRows();
+  dvUpdateSelectAll();
+}
+
+function dvRenderRows() {
+  const flds = window._dvCurrentFields || [];
+  const container = document.getElementById('dv-rows');
+  if (!container) return;
+  container.innerHTML = flds.map((f, i) => `
+    <div id="dv-row-${i}" draggable="true"
+      ondragstart="dvDragStart(event,${i})"
+      ondragover="dvDragOver(event,${i})"
+      ondrop="dvDrop(event,${i})"
+      ondragend="dvDragEnd()"
+      style="display:flex;align-items:center;gap:8px;padding:7px 10px;
+             background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+             margin-bottom:5px;transition:opacity .15s">
+      <span style="color:var(--text3);font-size:14px;cursor:grab;flex-shrink:0"
+            title="拖动排序">☰</span>
+      <span style="flex:1;font-size:13px;color:var(--text);font-weight:500">${escHtml(f.name)}</span>
+      <span style="font-size:11px;color:var(--text3)">${f.type==='number'?'数字':f.type==='date'?'日期':'文本'}</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;
+                    color:${f._visible?'var(--accent)':'var(--text3)'}">
+        <input type="checkbox" id="dv-vis-${i}" ${f._visible?'checked':''}
+          onchange="dvToggleOne(${i},this)">显示
+      </label>
+    </div>`).join('');
+}
+
+function dvToggleOne(idx, chk) {
+  const flds = window._dvCurrentFields;
+  if (flds && flds[idx]) flds[idx]._visible = chk.checked;
+  chk.closest('label').style.color = chk.checked ? 'var(--accent)' : 'var(--text3)';
+  dvUpdateSelectAll();
+}
+
+function dvToggleAll(checked) {
+  const flds = window._dvCurrentFields || [];
+  flds.forEach((f, i) => {
+    f._visible = checked;
+    const chk = document.getElementById(`dv-vis-${i}`);
+    if (chk) {
+      chk.checked = checked;
+      chk.closest('label').style.color = checked ? 'var(--accent)' : 'var(--text3)';
+    }
+  });
+}
+
+function dvUpdateSelectAll() {
+  const flds = window._dvCurrentFields || [];
+  const allChk = document.getElementById('dv-select-all');
+  if (!allChk) return;
+  const visCount = flds.filter(f => f._visible).length;
+  allChk.checked = visCount === flds.length;
+  allChk.indeterminate = visCount > 0 && visCount < flds.length;
+}
+
+// 拖拽排序
+function dvDragStart(e, idx) {
+  _dvDragIdx = idx;
+  e.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => {
+    const el = document.getElementById(`dv-row-${idx}`);
+    if (el) el.style.opacity = '0.4';
+  }, 0);
+}
+
+function dvDragOver(e, idx) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  // 高亮目标行
+  document.querySelectorAll('[id^=dv-row-]').forEach(el => el.style.borderColor = '');
+  const target = document.getElementById(`dv-row-${idx}`);
+  if (target && idx !== _dvDragIdx) target.style.borderColor = 'var(--accent)';
+}
+
+function dvDrop(e, toIdx) {
+  e.preventDefault();
+  const fromIdx = _dvDragIdx;
+  if (fromIdx === null || fromIdx === toIdx) return;
+  const flds = window._dvCurrentFields;
+  if (!flds) return;
+  // 移动元素
+  const [moved] = flds.splice(fromIdx, 1);
+  flds.splice(toIdx, 0, moved);
+  dvRenderRows();
+  dvUpdateSelectAll();
+}
+
+function dvDragEnd() {
+  _dvDragIdx = null;
+  document.querySelectorAll('[id^=dv-row-]').forEach(el => {
+    el.style.opacity = '';
+    el.style.borderColor = '';
+  });
+}
+
+async function dvSaveConfig(tableId) {
+  const flds = window._dvCurrentFields;
+  if (!flds) { closeModal(); return; }
+
+  const allFields = (_dcActiveTable.fields || []);
+  const hiddenFields = allFields.filter(f => f.hidden);
+
+  // 用 _dvCurrentFields 里的实时状态（_visible 已在勾选时同步）
+  const updatedVisible = flds.map((f, i) => ({
+    ...f,
+    visible: f._visible !== false,
+    order:   i,
+  }));
+
+  const newFields = [...updatedVisible, ...hiddenFields];
+
+  const btn = document.querySelector('#modal .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    await api('PUT', `/dc/tables/${tableId}`, {
+      name:        _dcActiveTable.name,
+      description: _dcActiveTable.description || '',
+      fields:      newFields,
+    });
+    // 更新本地缓存
+    _dcActiveTable.fields = newFields;
+    const idx = _dcTables.findIndex(t => t.id == tableId);
+    if (idx >= 0) _dcTables[idx].fields = newFields;
+    dcCloseModal();   // 专用关闭，完全不触发 render/loadPage
+    dcRenderTable();
+  } catch(e) {
+    alert('保存失败：' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '✓ 应用'; }
+  }
+}
+
+async function dvResetConfig() {
+  if (!_dcActiveTable) return;
+  // 清除所有字段的 visible/order，恢复默认
+  const newFields = (_dcActiveTable.fields || []).map((f, i) => {
+    const { visible, order, ...rest } = f;
+    return rest;
+  });
+  try {
+    await api('PUT', `/dc/tables/${_dcActiveTable.id}`, {
+      name:        _dcActiveTable.name,
+      description: _dcActiveTable.description || '',
+      fields:      newFields,
+    });
+    _dcActiveTable.fields = newFields;
+    const idx = _dcTables.findIndex(t => t.id == _dcActiveTable.id);
+    if (idx >= 0) _dcTables[idx].fields = newFields;
+  } catch(e) { alert('重置失败：' + e.message); return; }
+  dcCloseModal();
+  dcRenderTable();
+}
+
 function dcRenderTable() {
   const wrap = document.getElementById('dc-table-wrap');
   if (!wrap) return;
-  const fields = (_dcActiveTable?.fields || []).filter(f => !f.hidden);
+  const fields = dcGetVisibleFields(); // 用视图配置过滤+排序
   const canEdit = true;
 
   if (!_dcRows.length) {
@@ -7507,6 +7797,1121 @@ async function dcSaveShare(tid) {
 
 // ============================================================
 // ============================================================
+
+// ============================================================
+// EMAIL — 电子邮件
+// ============================================================
+
+let _emailFolder   = 'inbox';   // 当前文件夹
+let _emailPage     = 1;
+let _emailTotal    = 0;
+let _emailMessages = [];
+let _emailAccounts = [];
+let _emailContacts = [];
+let _emailSyncTimer = null;     // 定时同步定时器
+let _emailComposeData = null;   // 写信数据（回复/转发时带入）
+let _emailDraftId  = null;      // 当前草稿ID
+let _emailSelected = new Set(); // 多选：已选中的邮件id集合
+let _emailDraftTimer = null;    // 草稿自动保存定时器
+let _quillEditor   = null;      // Quill实例
+
+// 文件夹定义
+const EMAIL_FOLDERS = [
+  { id: 'inbox',    icon: '📥', label: '收件箱', badge: true },
+  { id: 'starred',  icon: '⭐', label: '星标邮件' },
+  { id: 'contacts', icon: '👤', label: '重要联系人' },
+  { id: 'outbox',   icon: '📮', label: '发件箱', badge: true },
+  { id: 'sent',     icon: '📤', label: '已发送' },
+  { id: 'drafts',   icon: '📝', label: '草稿箱' },
+  { id: 'trash',    icon: '🗑️', label: '已删除' },
+  { id: 'spam',     icon: '⚠️', label: '垃圾箱' },
+];
+
+async function loadEmail(content, actions) {
+  _emailFolder = 'inbox';
+  _emailPage   = 1;
+
+  // 顶部栏注入：收信、联系人、设置 按钮
+  if (actions) actions.innerHTML = `
+    <span id="em-sync-info" style="font-size:11px;color:var(--text3)"></span>
+    <button id="em-btn-sync" onclick="emailSyncAll(this)" class="btn btn-sm">📨 收信</button>
+    <button onclick="emailShowContacts()" class="btn btn-sm">👤 联系人</button>
+    <button onclick="emailShowAccounts()" class="btn btn-sm">⚙️ 设置</button>
+  `;
+
+  content.innerHTML = `
+  <div style="display:flex;height:calc(100vh - 72px);overflow:hidden">
+    <!-- 左侧文件夹 -->
+    <div id="em-sidebar" style="width:160px;flex-shrink:0;border-right:1px solid var(--border);
+         display:flex;flex-direction:column;background:var(--bg2);overflow-y:auto">
+      <div style="padding:12px 10px 6px">
+        <button onclick="emailCompose()" class="btn btn-primary"
+          style="width:100%;font-size:13px;padding:8px 0">✏️ 写信</button>
+      </div>
+      <div id="em-folder-list" style="flex:1;padding:4px 0"></div>
+    </div>
+
+    <!-- 中间列表 -->
+    <div id="em-list-panel" style="width:300px;flex-shrink:0;border-right:1px solid var(--border);
+         display:flex;flex-direction:column;overflow:hidden">
+      <!-- 标题行 -->
+      <div style="padding:8px 12px;border-bottom:1px solid var(--border);
+                  display:flex;align-items:center;gap:8px;min-height:40px">
+        <input type="checkbox" id="em-select-all" title="全选"
+          onclick="emailToggleSelectAll(this.checked)"
+          style="width:14px;height:14px;cursor:pointer;flex-shrink:0">
+        <span id="em-folder-title" style="font-size:13px;font-weight:600;color:var(--text);flex:1">收件箱</span>
+        <span id="em-total-badge" style="font-size:11px;color:var(--text3)"></span>
+      </div>
+      <!-- 多选操作栏（有选中时显示）-->
+      <div id="em-select-bar" style="display:none;padding:6px 12px;background:var(--bg3);
+                  border-bottom:1px solid var(--border);display:none;align-items:center;gap:8px">
+        <span id="em-select-count" style="font-size:12px;color:var(--text2);flex:1"></span>
+        <button class="btn btn-sm btn-danger" onclick="emailDeleteSelected()">🗑 删除所选</button>
+      </div>
+      <div id="em-list" style="flex:1;overflow-y:auto"></div>
+      <div id="em-pagination" style="padding:8px;border-top:1px solid var(--border)"></div>
+    </div>
+
+    <!-- 右侧详情/写信 -->
+    <div id="em-detail" style="flex:1;overflow:hidden;background:var(--bg1)">
+      <div style="display:flex;align-items:center;justify-content:center;
+                  height:100%;color:var(--text3);font-size:14px">
+        选择邮件查看详情，或点击「写信」新建邮件
+      </div>
+    </div>
+  </div>`;
+
+  // 加载账户、联系人、渲染文件夹
+  await emailLoadAccounts();
+  await emailLoadContacts();
+  emailRenderFolders();
+  await emailLoadMessages();
+
+  // 没有账户时弹出添加账户引导；有账户才启动定时收信
+  if (_emailAccounts.length === 0) {
+    emailShowAccounts();
+    emailAddAccountModal();
+    // 无账户：不启动定时器，等用户配置完账户后再说
+  } else {
+    // 有账户：启动快速定时（30秒），并立刻执行一次收信
+    emailStartSyncTimer();
+  }
+  // 检查是否有发送失败退回草稿的邮件，提示用户
+  emailCheckFailedBack();
+}
+
+// ── 定时同步 ──────────────────────────────────────────────────────────────────
+// 两档间隔：
+//   邮件页面打开  → 30秒（快速）
+//   其他页面      → 240秒（慢速，后台兜底）
+//   关闭浏览器    → 完全停止（visibilitychange 触发）
+const EMAIL_SYNC_FAST = 30000;   // 邮件页面：30秒
+const EMAIL_SYNC_SLOW = 240000;  // 其他页面：240秒
+
+// 启动快速定时（进入邮件页面时调用）
+function emailStartSyncTimer() {
+  emailSetSyncInterval(EMAIL_SYNC_FAST);
+  // 立刻同步一次
+  emailSyncAll(null);
+}
+
+// 切换到慢速定时（离开邮件页面时调用）
+function emailSlowSyncTimer() {
+  emailSetSyncInterval(EMAIL_SYNC_SLOW);
+}
+
+// 停止所有定时（关闭浏览器/退出登录时调用）
+function emailStopSyncTimer() {
+  if (_emailSyncTimer) { clearInterval(_emailSyncTimer); _emailSyncTimer = null; }
+}
+
+// 内部：设置间隔（自动清除旧定时器）
+function emailSetSyncInterval(ms) {
+  if (_emailSyncTimer) clearInterval(_emailSyncTimer);
+  _emailSyncTimer = setInterval(() => emailSyncAll(null), ms);
+}
+
+async function emailSyncAll(btn) {
+  // 前提：必须有配置邮箱账户，否则跳过
+  if (_emailAccounts.length === 0) {
+    // 尝试静默加载一次账户（可能刚登录还没加载）
+    await emailLoadAccounts();
+    if (_emailAccounts.length === 0) return; // 确实没有账户，不发请求
+  }
+  const info = document.getElementById('em-sync-info');
+  if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+  try {
+    const res = await api('POST', '/email/sync');
+    const now = new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
+    if (info) info.textContent = `${now} +${res.new||0}封`;
+    if (res.new > 0) await emailLoadMessages();
+    // 同步后刷新发件箱角标（可能有邮件发送成功/失败状态变化）
+    emailRefreshOutboxBadge();
+  } catch(e) {
+    if (info) info.textContent = '同步失败';
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '📨 收信'; }
+}
+
+// ── 账户 & 联系人加载 ─────────────────────────────────────────────────────────
+async function emailLoadAccounts() {
+  try {
+    const res = await api('GET', '/email/accounts');
+    _emailAccounts = res.accounts || [];
+  } catch(e) { _emailAccounts = []; }
+}
+
+async function emailLoadContacts() {
+  try {
+    const res = await api('GET', '/email/contacts');
+    _emailContacts = res.contacts || [];
+  } catch(e) { _emailContacts = []; }
+}
+
+// ── 文件夹渲染 ────────────────────────────────────────────────────────────────
+function emailRenderFolders() {
+  const el = document.getElementById('em-folder-list');
+  if (!el) return;
+  el.innerHTML = EMAIL_FOLDERS.map(f => {
+    const isActive = _emailFolder === f.id || (_emailFolder === 'starred' && f.id === 'starred');
+    return `<div onclick="emailSwitchFolder('${f.id}')"
+      style="display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;
+             font-size:13px;border-radius:6px;margin:2px 6px;
+             background:${isActive ? 'var(--accent)' : 'transparent'};
+             color:${isActive ? '#fff' : 'var(--text)'};"
+      onmouseenter="if(!${isActive}) this.style.background='var(--bg3)'"
+      onmouseleave="if(!${isActive}) this.style.background='transparent'">
+      <span>${f.icon}</span>
+      <span style="flex:1">${f.label}</span>
+    </div>`;
+  }).join('');
+}
+
+async function emailSwitchFolder(folder) {
+  _emailFolder = folder;
+  _emailPage = 1;
+  emailRenderFolders();
+  const titleEl = document.getElementById('em-folder-title');
+  if (titleEl) {
+    const f = EMAIL_FOLDERS.find(x => x.id === folder);
+    if (f) titleEl.textContent = f.label;
+  }
+  // 重置右侧
+  const detail = document.getElementById('em-detail');
+  if (detail) detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+    height:100%;color:var(--text3);font-size:14px">选择邮件查看详情</div>`;
+  await emailLoadMessages();
+}
+
+// ── 邮件列表 ──────────────────────────────────────────────────────────────────
+async function emailLoadMessages() {
+  const listEl = document.getElementById('em-list');
+  if (!listEl) return;
+  _emailSelected.clear(); // 切换/刷新时清空多选
+  emailUpdateSelectBar();
+  listEl.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>`;
+
+  try {
+    let url = `/email/messages?page=${_emailPage}`;
+    if (_emailFolder === 'starred') {
+      url += '&starred=1';
+    } else {
+      url += `&folder=${_emailFolder}`;
+    }
+    const res = await api('GET', url);
+    _emailMessages = res.messages || [];
+    _emailTotal    = res.total || 0;
+
+    if (_emailMessages.length === 0) {
+      listEl.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text3);font-size:13px">暂无邮件</div>`;
+      document.getElementById('em-total-badge').textContent = '';
+      document.getElementById('em-pagination').innerHTML = '';
+      return;
+    }
+
+    document.getElementById('em-total-badge').textContent = `共 ${_emailTotal} 封`;
+    listEl.innerHTML = _emailMessages.map(m => emailMessageRow(m)).join('');
+    emailRenderPagination();
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:20px;color:var(--red);font-size:13px">加载失败: ${e.message}</div>`;
+  }
+}
+
+function emailMessageRow(m) {
+  const date = m.mail_date ? m.mail_date.substring(0, 16) : '';
+  const from = escHtml(m.from_addr.replace(/<.*?>/, '').trim() || m.from_addr);
+  const subject = escHtml(m.subject || '（无主题）');
+  const unread = !m.is_read;
+  const star = m.is_starred ? '⭐' : '☆';
+  const hasAtt = m.has_attachments ? '📎 ' : '';
+  // 发件箱状态标签
+  const statusTag = m.folder === 'outbox' ? (() => {
+    const s = m.send_status || 'pending';
+    const map = { pending:'⏳ 等待发送', sending:'📡 发送中', sent:'✅ 已发送', failed:'❌ 发送失败' };
+    const color = { pending:'var(--text3)', sending:'var(--accent)', sent:'var(--green)', failed:'var(--red)' };
+    return `<span style="font-size:11px;color:${color[s]||'var(--text3)'}">${map[s]||s}</span>`;
+  })() : '';
+  // 多账户标签
+  const acctTag = _emailAccounts.length > 1
+    ? `<span style="font-size:10px;background:var(--bg3);border-radius:4px;padding:1px 5px;color:var(--text3);margin-left:4px">${escHtml(m.account_email||'')}</span>`
+    : '';
+
+  const sel = _emailSelected.has(m.id);
+  const rowBg = sel ? 'var(--bg3)' : unread ? 'var(--bg2)' : '';
+  const leaveBg = sel ? 'var(--bg3)' : unread ? 'var(--bg2)' : '';
+  return `<div id="em-row-${m.id}"
+    onclick="emailOpenMessage(${m.id})"
+    style="padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;background:${rowBg}"
+    onmouseenter="this.style.background='var(--bg3)'"
+    onmouseleave="this.style.background='${leaveBg}'">
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+      <input type="checkbox" id="em-chk-${m.id}"
+        ${sel ? 'checked' : ''}
+        onclick="emailToggleSelect(event,${m.id})"
+        style="width:13px;height:13px;cursor:pointer;flex-shrink:0">
+      <span style="flex:1;font-size:13px;font-weight:${unread ? '600' : '400'};
+               color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${escHtml(m.from_addr)}">${from}${acctTag}</span>
+      <span style="font-size:11px;color:var(--text3);flex-shrink:0">${date}</span>
+      <span onclick="emailToggleStar(event,${m.id},${m.is_starred})"
+        style="font-size:13px;cursor:pointer;flex-shrink:0" title="星标">${star}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <div style="flex:1;font-size:12px;color:var(--text);font-weight:${unread?'600':'400'};
+                  overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${hasAtt}${subject}</div>
+      ${statusTag}
+    </div>
+  </div>`;
+}
+
+// ── 多选 ──────────────────────────────────────────────────────────────────────
+function emailToggleSelect(e, mid) {
+  e.stopPropagation();
+  if (_emailSelected.has(mid)) {
+    _emailSelected.delete(mid);
+  } else {
+    _emailSelected.add(mid);
+  }
+  // 更新行背景
+  const row = document.getElementById(`em-row-${mid}`);
+  if (row) row.style.background = _emailSelected.has(mid) ? 'var(--bg3)' : '';
+  emailUpdateSelectBar();
+}
+
+function emailToggleSelectAll(checked) {
+  _emailSelected.clear();
+  if (checked) {
+    _emailMessages.forEach(m => _emailSelected.add(m.id));
+  }
+  // 刷新所有行的复选框和背景
+  _emailMessages.forEach(m => {
+    const chk = document.getElementById(`em-chk-${m.id}`);
+    if (chk) chk.checked = checked;
+    const row = document.getElementById(`em-row-${m.id}`);
+    if (row) row.style.background = checked ? 'var(--bg3)' : '';
+  });
+  emailUpdateSelectBar();
+}
+
+// 更新操作栏显示（有选中则显示，同步全选框状态）
+function emailUpdateSelectBar() {
+  const bar = document.getElementById('em-select-bar');
+  const cnt = document.getElementById('em-select-count');
+  const allChk = document.getElementById('em-select-all');
+  const n = _emailSelected.size;
+  if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
+  if (cnt) cnt.textContent = `已选 ${n} 封`;
+  if (allChk) {
+    allChk.checked = n > 0 && n === _emailMessages.length;
+    allChk.indeterminate = n > 0 && n < _emailMessages.length;
+  }
+}
+
+async function emailDeleteSelected() {
+  const ids = [..._emailSelected].map(id => parseInt(id)); // 确保是整数
+  if (ids.length === 0) return;
+  const label = _emailFolder === 'drafts' ? '删除' : '删除（移入回收站）';
+  if (!confirm(`确认${label} ${ids.length} 封邮件？`)) return;
+
+  // 逐条删除，避免并发时SQLite写锁竞争
+  let ok = 0;
+  for (const id of ids) {
+    try {
+      await api('DELETE', `/email/messages/${id}`);
+      ok++;
+    } catch(e) { /* 静默，继续删其他的 */ }
+  }
+  _emailSelected.clear();
+  await emailLoadMessages();
+  // 右侧清空（草稿删除后不保留预览）
+  const detail = document.getElementById('em-detail');
+  if (detail && (_emailFolder === 'drafts' || ok > 0)) {
+    detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+      height:100%;color:var(--text3);font-size:14px">选择邮件查看详情，或点击「写信」新建邮件</div>`;
+  }
+  if (ok < ids.length) emailToast(`删除完成：${ok}/${ids.length} 封成功`, 'warn');
+}
+
+function emailRenderPagination() {
+  const el = document.getElementById('em-pagination');
+  if (!el) return;
+  const totalPages = Math.ceil(_emailTotal / 30) || 1;
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+      <button class="btn btn-sm" onclick="_emailPage=Math.max(1,_emailPage-1);emailLoadMessages()"
+        ${_emailPage<=1?'disabled':''}>‹</button>
+      <span style="color:var(--text3)">${_emailPage}/${totalPages}</span>
+      <button class="btn btn-sm" onclick="_emailPage=Math.min(${totalPages},_emailPage+1);emailLoadMessages()"
+        ${_emailPage>=totalPages?'disabled':''}>›</button>
+    </div>`;
+}
+
+async function emailToggleStar(e, mid, currentStar) {
+  e.stopPropagation();
+  const newStar = !currentStar;
+  await api('PUT', `/email/messages/${mid}/star`, { starred: newStar });
+  const m = _emailMessages.find(x => x.id === mid);
+  if (m) m.is_starred = newStar;
+  const row = document.getElementById(`em-row-${mid}`);
+  if (row) {
+    const starEl = row.querySelector('span[title="星标"]');
+    if (starEl) starEl.textContent = newStar ? '⭐' : '☆';
+  }
+}
+
+// ── 邮件详情 ──────────────────────────────────────────────────────────────────
+let _emailOpeningMsg = false; // 防重入：避免快速连点触发多次请求
+
+async function emailOpenMessage(mid) {
+  if (_emailOpeningMsg) return;
+  _emailOpeningMsg = true;
+  const detail = document.getElementById('em-detail');
+  if (!detail) { _emailOpeningMsg = false; return; }
+  detail.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>`;
+
+  // 标记列表中已读
+  const row = document.getElementById(`em-row-${mid}`);
+  if (row) {
+    row.style.background = '';
+    row.style.fontWeight = '400';
+  }
+
+  try {
+    const res = await api('GET', `/email/messages/${mid}`);
+    const m = res.message;
+
+    // 草稿箱：直接进入编辑状态
+    if (m.folder === 'drafts') {
+      _emailOpeningMsg = false;
+      emailOpenDraft(m);
+      return;
+    }
+    const atts = res.attachments || [];
+
+    const fromHtml = `<span style="font-weight:600">${escHtml(m.from_addr)}</span>`;
+    const attHtml = atts.length > 0 ? `
+      <div style="padding:10px 20px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:8px">
+        ${atts.map(a => `
+          <a href="/api/email/messages/${mid}/attachments/${a.id}/download?token=${state.token}"
+             style="display:flex;align-items:center;gap:6px;padding:6px 10px;
+                    background:var(--bg3);border-radius:6px;font-size:12px;
+                    color:var(--text);text-decoration:none;border:1px solid var(--border)"
+             download="${escHtml(a.filename)}">
+            📎 ${escHtml(a.filename)}
+            <span style="color:var(--text3)">(${(a.size/1024).toFixed(1)}KB)</span>
+          </a>`).join('')}
+      </div>` : '';
+
+    // 正文区域：优先HTML，在iframe中渲染
+    let bodyHtml = '';
+    if (m.body_html) {
+      const encoded = btoa(unescape(encodeURIComponent(m.body_html)));
+      bodyHtml = `<iframe sandbox="allow-same-origin"
+        srcdoc="${escHtml(m.body_html)}"
+        style="width:100%;min-height:400px;border:none;background:#fff"
+        onload="this.style.height=this.contentDocument.body.scrollHeight+40+'px'"></iframe>`;
+    } else {
+      bodyHtml = `<pre style="white-space:pre-wrap;font-size:13px;color:var(--text);
+                       font-family:inherit;margin:0;padding:16px 20px">${escHtml(m.body_text)}</pre>`;
+    }
+
+    detail.innerHTML = `
+      <div style="max-width:860px;margin:0 auto;padding:20px 16px">
+        <!-- 操作栏 -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+          <button class="btn btn-sm" onclick="emailReply(${mid})">↩ 回复</button>
+          <button class="btn btn-sm" onclick="emailForward(${mid})">↪ 转发</button>
+          <button class="btn btn-sm" onclick="emailToggleStar(event,${mid},${m.is_starred})">
+            ${m.is_starred?'⭐ 取消星标':'☆ 星标'}
+          </button>
+          <button class="btn btn-sm" onclick="emailMovePrompt(${mid})">📁 移动</button>
+          <button class="btn btn-sm btn-danger" onclick="emailDelete(${mid})">🗑 删除</button>
+          ${m.folder==='trash'||m.folder==='spam'
+            ? `<button class="btn btn-sm btn-danger" onclick="emailPermanentDelete(${mid})">彻底删除</button>` : ''}
+        </div>
+        <!-- 邮件头 -->
+        <div class="card" style="padding:0;overflow:hidden;margin-bottom:0">
+          <div style="padding:16px 20px;border-bottom:1px solid var(--border)">
+            <div style="font-size:17px;font-weight:700;color:var(--text);margin-bottom:10px">
+              ${escHtml(m.subject||'（无主题）')}
+            </div>
+            <div style="font-size:12px;color:var(--text3);line-height:1.8">
+              <div>发件人：${fromHtml}</div>
+              <div>收件人：${escHtml(m.to_addrs)}</div>
+              ${m.cc_addrs ? `<div>抄送：${escHtml(m.cc_addrs)}</div>` : ''}
+              <div>时间：${m.mail_date||'—'}</div>
+              ${_emailAccounts.length>1 ? `<div>账户：${escHtml(m.account_name)} &lt;${escHtml(m.account_email)}&gt;</div>` : ''}
+            </div>
+          </div>
+          <!-- 正文 -->
+          <div style="padding:0">${bodyHtml}</div>
+          <!-- 附件 -->
+          ${attHtml}
+        </div>
+      </div>`;
+
+    // 更新列表中已读状态
+    const msgInList = _emailMessages.find(x => x.id === mid);
+    if (msgInList) msgInList.is_read = true;
+    _emailOpeningMsg = false;
+  } catch(e) {
+    _emailOpeningMsg = false;
+    detail.innerHTML = `<div style="padding:20px;color:var(--red)">加载失败: ${e.message}</div>`;
+  }
+}
+
+// ── 邮件操作 ──────────────────────────────────────────────────────────────────
+async function emailDelete(mid) {
+  await api('DELETE', `/email/messages/${mid}`);
+  await emailLoadMessages();
+  const detail = document.getElementById('em-detail');
+  if (detail) detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+    height:100%;color:var(--text3);font-size:14px">邮件已删除</div>`;
+}
+
+async function emailPermanentDelete(mid) {
+  if (!confirm('彻底删除后无法恢复，确认删除？')) return;
+  await api('DELETE', `/email/messages/${mid}/permanent`);
+  await emailLoadMessages();
+}
+
+function emailMovePrompt(mid) {
+  const folders = EMAIL_FOLDERS.filter(f => !['starred','contacts'].includes(f.id));
+  dcShowModal(`
+    <div class="modal">
+      <div class="modal-header">移动到文件夹<span class="modal-close" onclick="dcCloseModal()">×</span></div>
+      <div class="modal-body">
+        <div style="display:flex;flex-direction:column;gap:8px">
+          ${folders.map(f => `
+            <button class="btn" onclick="emailMoveTo(${mid},'${f.id}')"
+              style="text-align:left;padding:10px 16px;font-size:13px">
+              ${f.icon} ${f.label}
+            </button>`).join('')}
+        </div>
+      </div>
+    </div>`);
+}
+
+async function emailMoveTo(mid, folder) {
+  dcCloseModal();
+  await api('PUT', `/email/messages/${mid}/move`, { folder });
+  await emailLoadMessages();
+}
+
+function emailReply(mid) {
+  const m = _emailMessages.find(x => x.id === mid);
+  if (!m) return;
+  const accountId = m.account_id || (_emailAccounts[0]?.id);
+  emailCompose({
+    account_id: accountId,
+    to: [m.from_addr],
+    subject: m.subject.startsWith('Re:') ? m.subject : 'Re: ' + m.subject,
+    quote: m.body_text || m.body_html,
+    quoteIsHtml: !!m.body_html,
+  });
+}
+
+function emailForward(mid) {
+  const m = _emailMessages.find(x => x.id === mid);
+  if (!m) return;
+  const accountId = m.account_id || (_emailAccounts[0]?.id);
+  emailCompose({
+    account_id: accountId,
+    subject: m.subject.startsWith('Fwd:') ? m.subject : 'Fwd: ' + m.subject,
+    quote: m.body_text || m.body_html,
+    quoteIsHtml: !!m.body_html,
+  });
+}
+
+// 打开草稿进入编辑状态（内容预填，保存时走更新草稿接口）
+function emailOpenDraft(m) {
+  // 先停草稿自动保存（如果有的话）
+  if (_emailDraftTimer) { clearInterval(_emailDraftTimer); _emailDraftTimer = null; }
+
+  // 设置当前草稿ID，后续保存/发送时使用
+  _emailDraftId = m.id;
+
+  // 确定发件账户（优先使用草稿关联的账户）
+  const draftAccountId = m.account_id || (_emailAccounts[0]?.id || 0);
+
+  emailCompose({
+    account_id: draftAccountId,
+    to:         m.to_addrs ? m.to_addrs.split(',').map(s => s.trim()).filter(Boolean) : [],
+    cc:         m.cc_addrs || '',
+    subject:    m.subject  || '',
+    body_html:  m.body_html || '',
+    body_text:  m.body_text || '',
+    _draftId:   m.id,      // 标记为草稿编辑模式，顶部标题显示"编辑草稿"
+  });
+}
+
+// ── 写信 ──────────────────────────────────────────────────────────────────────
+function emailCompose(opts) {
+  _emailComposeData = opts || {};
+  // 如果是从草稿打开（opts._draftId 有值），保留草稿ID；否则清空（新写信）
+  if (opts?._draftId) {
+    _emailDraftId = opts._draftId;
+  } else {
+    _emailDraftId = null;
+  }
+  if (_emailDraftTimer) { clearInterval(_emailDraftTimer); _emailDraftTimer = null; }
+  _quillEditor = null;
+
+  const detail = document.getElementById('em-detail');
+  if (!detail) return;
+
+  const acctOptions = _emailAccounts.map(a =>
+    `<option value="${a.id}" ${(opts?.account_id===a.id)?'selected':''}>${escHtml(a.name)} &lt;${escHtml(a.email_address)}&gt;</option>`
+  ).join('');
+
+  if (_emailAccounts.length === 0) {
+    detail.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text3)">
+      请先在「账户设置」中添加邮箱账户
+      <br><button class="btn btn-primary" style="margin-top:12px" onclick="emailShowAccounts()">去添加</button>
+    </div>`;
+    return;
+  }
+
+  const toVal = opts?.to ? opts.to.join(', ') : '';
+  const subjectVal = escHtml(opts?.subject || '');
+  const ccVal = escHtml(opts?.cc || '');
+  const isDraft = !!opts?._draftId;
+  const composeTitle = isDraft ? '📝 编辑草稿' : '✏️ 新邮件';
+
+  detail.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%">
+      <!-- 头部 -->
+      <div style="padding:12px 16px;border-bottom:1px solid var(--border);
+                  display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:14px;font-weight:600;color:var(--text)">${composeTitle}</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-sm" onclick="emailSaveDraft()">💾 保存草稿</button>
+          <button class="btn btn-primary btn-sm" onclick="emailSendNow()">📤 发送</button>
+          <button class="btn btn-sm" onclick="emailCancelCompose()">✕</button>
+        </div>
+      </div>
+      <!-- 表单 -->
+      <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="width:50px;font-size:12px;color:var(--text3);flex-shrink:0">发件人</span>
+          <select id="em-compose-account" style="flex:1;padding:5px 8px;font-size:13px;
+            background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            ${acctOptions}
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="width:50px;font-size:12px;color:var(--text3);flex-shrink:0">收件人</span>
+          <input id="em-compose-to" value="${escHtml(toVal)}" placeholder="多个地址用逗号分隔"
+            style="flex:1;padding:5px 8px;font-size:13px;background:var(--bg3);
+                   border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        </div>
+        <div id="em-cc-row" style="${ccVal ? 'display:flex' : 'display:none'};align-items:center;gap:8px;margin-bottom:8px">
+          <span style="width:50px;font-size:12px;color:var(--text3);flex-shrink:0">抄送</span>
+          <input id="em-compose-cc" value="${ccVal}" placeholder="抄送地址"
+            style="flex:1;padding:5px 8px;font-size:13px;background:var(--bg3);
+                   border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="width:50px;font-size:12px;color:var(--text3);flex-shrink:0">主题</span>
+          <input id="em-compose-subject" value="${subjectVal}" placeholder="邮件主题"
+            style="flex:1;padding:5px 8px;font-size:13px;background:var(--bg3);
+                   border:1px solid var(--border);border-radius:6px;color:var(--text)">
+          <button onclick="document.getElementById('em-cc-row').style.display='flex'"
+            style="background:none;border:none;font-size:12px;color:var(--accent);cursor:pointer">
+            +抄送
+          </button>
+        </div>
+      </div>
+      <!-- Quill编辑器 -->
+      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <div id="em-quill-editor" style="flex:1;font-size:13px;overflow-y:auto"></div>
+      </div>
+    </div>`;
+
+  // 加载 Quill
+  emailInitQuill(opts);
+
+  // 每30秒自动保存草稿
+  _emailDraftTimer = setInterval(() => emailSaveDraft(true), 30000);
+}
+
+function emailInitQuill(opts) {
+  if (typeof Quill === 'undefined') {
+    // 动态加载 Quill CSS + JS
+    if (!document.getElementById('quill-css')) {
+      const link = document.createElement('link');
+      link.id = 'quill-css';
+      link.rel = 'stylesheet';
+      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.snow.min.css';
+      document.head.appendChild(link);
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.min.js';
+    script.onload = () => emailInitQuillInstance(opts);
+    document.head.appendChild(script);
+  } else {
+    emailInitQuillInstance(opts);
+  }
+}
+
+function emailInitQuillInstance(opts) {
+  const el = document.getElementById('em-quill-editor');
+  if (!el) return;
+  _quillEditor = new Quill('#em-quill-editor', {
+    theme: 'snow',
+    placeholder: '写点什么…',
+    modules: {
+      toolbar: [
+        ['bold','italic','underline','strike'],
+        [{ color: [] }, { background: [] }],
+        [{ list: 'ordered' }, { list: 'bullet' }],
+        ['link'],
+        ['clean'],
+      ],
+    },
+  });
+
+  // 草稿：直接填入正文内容（不作为引用块）
+  if (opts?.body_html) {
+    _quillEditor.clipboard.dangerouslyPasteHTML(opts.body_html);
+    _quillEditor.setSelection(0, 0);
+  } else if (opts?.body_text) {
+    _quillEditor.setText(opts.body_text);
+    _quillEditor.setSelection(0, 0);
+  } else if (opts?.quote) {
+    // 回复/转发：作为引用块插入
+    const quoteHtml = opts.quoteIsHtml
+      ? `<blockquote style="border-left:3px solid #ccc;margin:8px 0;padding-left:12px;color:#666">${opts.quote}</blockquote>`
+      : `<blockquote style="border-left:3px solid #ccc;margin:8px 0;padding-left:12px;color:#666"><pre style="margin:0;white-space:pre-wrap">${escHtml(opts.quote)}</pre></blockquote>`;
+    _quillEditor.clipboard.dangerouslyPasteHTML('<p><br></p>' + quoteHtml);
+    _quillEditor.setSelection(0, 0);
+  }
+}
+
+async function emailSaveDraft(silent) {
+  if (!_quillEditor) return;
+  const to  = document.getElementById('em-compose-to')?.value.trim() || '';
+  const cc  = document.getElementById('em-compose-cc')?.value.trim() || '';
+  const sub = document.getElementById('em-compose-subject')?.value.trim() || '';
+  const html = _quillEditor.root.innerHTML;
+  const text = _quillEditor.getText();
+  const accId = parseInt(document.getElementById('em-compose-account')?.value || '0');
+
+  try {
+    if (_emailDraftId) {
+      await api('PUT', `/email/draft/${_emailDraftId}`, { to, cc, subject: sub, body_html: html, body_text: text });
+    } else {
+      const res = await api('POST', '/email/draft', { account_id: accId, to, cc, subject: sub, body_html: html, body_text: text });
+      _emailDraftId = res.id;
+    }
+
+    // silent=true 时是自动保存（定时器触发），不关闭界面
+    if (!silent) {
+      // 手动点保存草稿：停定时器、清状态、关闭写信界面
+      if (_emailDraftTimer) { clearInterval(_emailDraftTimer); _emailDraftTimer = null; }
+      _emailDraftId = null;
+      _quillEditor = null;
+      const detail = document.getElementById('em-detail');
+      if (detail) detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+        height:100%;color:var(--text3);font-size:14px">草稿已保存</div>`;
+      // 若当前在草稿箱，刷新列表
+      if (_emailFolder === 'drafts') await emailLoadMessages();
+      emailToast('草稿已保存', 'success');
+    }
+  } catch(e) {
+    if (!silent) emailToast('草稿保存失败：' + e.message, 'error');
+  }
+}
+
+async function emailSendNow() {
+  if (!_quillEditor) return;
+  const to  = (document.getElementById('em-compose-to')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const cc  = (document.getElementById('em-compose-cc')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const sub = document.getElementById('em-compose-subject')?.value.trim() || '';
+  const html = _quillEditor.root.innerHTML;
+  const text = _quillEditor.getText();
+  const accId = parseInt(document.getElementById('em-compose-account')?.value || '0');
+
+  if (to.length === 0) { emailToast('请填写收件人', 'error'); return; }
+  if (!accId) { emailToast('请选择发件账户', 'error'); return; }
+
+  // 发送中状态：禁用按钮，显示进度
+  const sendBtn = document.querySelector('#em-detail .btn-primary');
+  const origText = sendBtn?.textContent || '📤 发送';
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = '发送中…'; }
+
+  try {
+    await api('POST', '/email/send', {
+      account_id: accId, to, cc, subject: sub,
+      body_html: html, body_text: text,
+      draft_id: _emailDraftId || 0,
+    });
+    if (_emailDraftTimer) { clearInterval(_emailDraftTimer); _emailDraftTimer = null; }
+    _emailDraftId = null;
+    _quillEditor = null;
+    // 异步发送：立即关闭写信界面，提示已进入发送队列
+    const detail = document.getElementById('em-detail');
+    if (detail) detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+      height:100%;color:var(--text3);font-size:14px">选择邮件查看详情，或点击「写信」新建邮件</div>`;
+    emailToast('📮 邮件已加入发送队列，将在后台发送', 'success');
+    // 切换到发件箱让用户看到状态
+    await emailSwitchFolder('outbox');
+  } catch(e) {
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = origText; }
+    emailToast('提交失败：' + e.message, 'error');
+  }
+}
+
+// 检查发送失败退回草稿的邮件，toast提示用户
+async function emailCheckFailedBack() {
+  try {
+    const res = await api('GET', '/email/outbox/status');
+    if (res.failed_back > 0) {
+      emailToast(
+        `⚠️ 有 ${res.failed_back} 封邮件因多次发送失败已退回草稿箱，请检查邮箱账户设置后重新发送`,
+        'warn', 8000
+      );
+      // 告知服务端用户已看到提示，下次不再重复提示
+      api('POST', '/email/outbox/ack').catch(()=>{});
+    }
+    if (res.pending > 0) {
+      const info = document.getElementById('em-sync-info');
+      if (info) info.textContent = `📮 ${res.pending}封待发`;
+    }
+  } catch(e) { /* 静默 */ }
+}
+
+// 刷新发件箱角标数量
+async function emailRefreshOutboxBadge() {
+  try {
+    const res = await api('GET', '/email/outbox/status');
+    // 更新发件箱角标（如果当前在发件箱视图则刷新列表）
+    if (_emailFolder === 'outbox') await emailLoadMessages();
+    const info = document.getElementById('em-sync-info');
+    if (info && res.pending > 0) info.textContent = `📮 ${res.pending}封待发`;
+    else if (info && res.pending === 0 && info.textContent.includes('待发')) info.textContent = '';
+  } catch(e) { /* 静默 */ }
+}
+
+// 邮件模块通用 Toast（不阻塞界面，3秒后自动消失）
+function emailToast(msg, type, duration) {
+  const el = document.createElement('div');
+  const bgMap = { error: '#c62828', success: '#2e7d32', warn: '#e65100' };
+  const bg = bgMap[type] || bgMap.success;
+  const ms = duration || (type === 'error' ? 5000 : type === 'warn' ? 7000 : 2500);
+  el.style.cssText = `position:fixed;top:72px;right:20px;z-index:9999;
+    padding:10px 18px;border-radius:8px;font-size:13px;max-width:400px;word-break:break-word;
+    background:${bg};color:#fff;
+    box-shadow:0 4px 16px rgba(0,0,0,.35);animation:fadeIn .2s`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+
+function emailCancelCompose() {
+  if (_emailDraftTimer) { clearInterval(_emailDraftTimer); _emailDraftTimer = null; }
+  _emailDraftId = null;
+  _quillEditor = null;
+  const detail = document.getElementById('em-detail');
+  if (detail) detail.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;
+    height:100%;color:var(--text3);font-size:14px">选择邮件查看详情，或点击「写信」新建邮件</div>`;
+}
+
+// ── 重要联系人视图 ─────────────────────────────────────────────────────────────
+async function emailShowContacts() {
+  _emailFolder = 'contacts';
+  emailRenderFolders();
+  const detail = document.getElementById('em-detail');
+  if (!detail) return;
+  const listEl = document.getElementById('em-list');
+  if (listEl) listEl.innerHTML = '';
+
+  await emailLoadContacts();
+  detail.innerHTML = `
+    <div style="padding:20px;max-width:600px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <span style="font-size:15px;font-weight:600;color:var(--text)">👤 重要联系人</span>
+        <button class="btn btn-sm btn-primary" onclick="emailAddContact()">＋ 添加</button>
+      </div>
+      <div id="em-contacts-list">
+        ${_emailContacts.length === 0
+          ? '<div style="color:var(--text3);font-size:13px">暂无联系人</div>'
+          : _emailContacts.map(c => `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 0;
+                        border-bottom:1px solid var(--border)">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:500;color:var(--text)">${escHtml(c.name||c.email_address)}</div>
+                <div style="font-size:12px;color:var(--text3)">${escHtml(c.email_address)}</div>
+              </div>
+              <button onclick="emailCompose({to:['${escHtml(c.email_address)}'],account_id:${_emailAccounts[0]?.id||0}})"
+                class="btn btn-sm">写信</button>
+              <button onclick="emailDeleteContact(${c.id})" class="btn btn-sm btn-danger">删除</button>
+            </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function emailAddContact() {
+  dcShowModal(`
+    <div class="modal">
+      <div class="modal-header">添加重要联系人<span class="modal-close" onclick="dcCloseModal()">×</span></div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>姓名（可选）</label>
+          <input id="ec-name" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+        </div>
+        <div class="form-group">
+          <label>邮箱地址 <span style="color:var(--red)">*</span></label>
+          <input id="ec-email" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="dcCloseModal()">取消</button>
+        <button class="btn btn-primary" onclick="emailDoAddContact()">保存</button>
+      </div>
+    </div>`);
+}
+
+async function emailDoAddContact() {
+  const name  = document.getElementById('ec-name')?.value.trim() || '';
+  const email = document.getElementById('ec-email')?.value.trim() || '';
+  if (!email) { alert('请填写邮箱地址'); return; }
+  await api('POST', '/email/contacts', { name, email_address: email });
+  dcCloseModal();
+  emailShowContacts();
+}
+
+async function emailDeleteContact(cid) {
+  if (!confirm('确认删除该联系人？')) return;
+  await api('DELETE', `/email/contacts/${cid}`);
+  emailShowContacts();
+}
+
+// ── 账户设置界面 ──────────────────────────────────────────────────────────────
+async function emailShowAccounts() {
+  const detail = document.getElementById('em-detail');
+  if (!detail) return;
+
+  // 拉取预设
+  let presets = [];
+  try {
+    const pres = await api('GET', '/email/presets');
+    presets = pres.presets ? JSON.parse(pres.presets) : [];
+  } catch(e) { presets = []; }
+
+  await emailLoadAccounts();
+
+  const renderAccounts = () => _emailAccounts.map(a => `
+    <div style="padding:12px 16px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:var(--bg2)">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(a.name)}</div>
+          <div style="font-size:12px;color:var(--text3)">${escHtml(a.email_address)} · ${a.protocol.toUpperCase()}</div>
+          ${a.last_sync_at ? `<div style="font-size:11px;color:var(--text3)">最后同步：${a.last_sync_at}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" onclick="emailTestAccount(${a.id})">测试</button>
+          <button class="btn btn-sm" onclick="emailEditAccount(${a.id})">编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="emailDeleteAccount(${a.id})">删除</button>
+        </div>
+      </div>
+    </div>`).join('') || '<div style="color:var(--text3);font-size:13px;margin-bottom:16px">暂无账户</div>';
+
+  detail.innerHTML = `
+    <div style="padding:20px;max-width:680px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <span style="font-size:15px;font-weight:600;color:var(--text)">📬 邮箱账户</span>
+        <button class="btn btn-primary btn-sm" onclick="emailAddAccountModal()">＋ 添加账户</button>
+      </div>
+      <div id="em-accounts-list">${renderAccounts()}</div>
+    </div>`;
+
+  window._emailPresets = presets;
+}
+
+async function emailTestAccount(aid) {
+  try {
+    const res = await api('POST', `/email/accounts/${aid}/test`);
+    alert(res.ok ? '✅ ' + res.message : '❌ ' + res.error);
+  } catch(e) { alert('测试失败: ' + e.message); }
+}
+
+async function emailDeleteAccount(aid) {
+  if (!confirm('删除账户将同时删除该账户的所有本地邮件缓存，确认？')) return;
+  await api('DELETE', `/email/accounts/${aid}`);
+  emailShowAccounts();
+}
+
+function emailAddAccountModal(existingId) {
+  const isEdit = !!existingId;
+  const acc = isEdit ? _emailAccounts.find(a => a.id === existingId) : {};
+  const presets = window._emailPresets || [];
+
+  const presetOpts = presets.length > 0
+    ? `<div class="form-group">
+        <label>从预设选择</label>
+        <select onchange="emailApplyPreset(this.value)"
+          style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <option value="">-- 手动填写 --</option>
+          ${presets.map((p,i) => `<option value="${i}">${escHtml(p.name||'预设'+i)}</option>`).join('')}
+        </select>
+      </div>` : '';
+
+  const field = (id, label, val='', type='text', ph='') =>
+    `<div class="form-group">
+      <label>${label}</label>
+      <input id="eaf-${id}" type="${type}" value="${escHtml(String(val))}" placeholder="${ph}"
+        style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+    </div>`;
+
+  const toggle = (id, label, checked) =>
+    `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;margin-bottom:8px">
+      <input type="checkbox" id="eaf-${id}" ${checked?'checked':''}> ${label}
+    </label>`;
+
+  dcShowModal(`
+    <div class="modal" style="max-width:560px">
+      <div class="modal-header">${isEdit?'编辑账户':'添加邮箱账户'}<span class="modal-close" onclick="dcCloseModal()">×</span></div>
+      <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+        ${presetOpts}
+        ${field('name','显示名称', acc.name||'', 'text', '如：工作邮箱')}
+        ${field('email','邮箱地址', acc.email_address||'', 'email', 'user@example.com')}
+        ${field('username','登录用户名', acc.username||'')}
+        ${field('password','密码', '', 'password', isEdit?'不修改请留空':'必填')}
+
+        <div style="font-size:12px;font-weight:700;color:var(--accent);margin:10px 0 6px">接收协议</div>
+        <div style="display:flex;gap:12px;margin-bottom:8px">
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer">
+            <input type="radio" name="eaf-proto" value="imap" ${(acc.protocol||'imap')==='imap'?'checked':''}> IMAP
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer">
+            <input type="radio" name="eaf-proto" value="pop3" ${acc.protocol==='pop3'?'checked':''}> POP3
+          </label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 100px;gap:8px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>IMAP主机</label>
+            <input id="eaf-imap_host" value="${escHtml(acc.imap_host||'')}" placeholder="imap.example.com"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>端口</label>
+            <input id="eaf-imap_port" type="number" value="${acc.imap_port||993}"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+        </div>
+        ${toggle('imap_ssl','IMAP 使用 SSL/TLS', acc.imap_ssl !== false)}
+
+        <div style="display:grid;grid-template-columns:1fr 100px;gap:8px;margin-top:4px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>POP3主机</label>
+            <input id="eaf-pop3_host" value="${escHtml(acc.pop3_host||'')}" placeholder="pop3.example.com"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>端口</label>
+            <input id="eaf-pop3_port" type="number" value="${acc.pop3_port||995}"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+        </div>
+        ${toggle('pop3_ssl','POP3 使用 SSL/TLS', acc.pop3_ssl !== false)}
+
+        <div style="font-size:12px;font-weight:700;color:var(--accent);margin:10px 0 6px">发送 (SMTP)</div>
+        <div style="display:grid;grid-template-columns:1fr 100px;gap:8px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>SMTP主机</label>
+            <input id="eaf-smtp_host" value="${escHtml(acc.smtp_host||'')}" placeholder="smtp.example.com"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>端口</label>
+            <input id="eaf-smtp_port" type="number" value="${acc.smtp_port||465}"
+              style="width:100%;padding:7px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+        </div>
+        ${toggle('smtp_ssl','SMTP 使用 SSL/TLS', acc.smtp_ssl !== false)}
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="dcCloseModal()">取消</button>
+        <button class="btn btn-primary" onclick="emailSaveAccount(${isEdit?existingId:0})">保存</button>
+      </div>
+    </div>`);
+
+  window._emailEditingId = isEdit ? existingId : 0;
+}
+
+function emailApplyPreset(idx) {
+  if (idx === '') return;
+  const p = (window._emailPresets || [])[parseInt(idx)];
+  if (!p) return;
+  const set = (id, val) => { const el = document.getElementById('eaf-' + id); if (el) el.value = val; };
+  set('imap_host', p.imap_host || '');
+  set('imap_port', p.imap_port || 993);
+  set('pop3_host', p.pop3_host || '');
+  set('pop3_port', p.pop3_port || 995);
+  set('smtp_host', p.smtp_host || '');
+  set('smtp_port', p.smtp_port || 465);
+  const setCheck = (id, val) => { const el = document.getElementById('eaf-' + id); if (el) el.checked = !!val; };
+  setCheck('imap_ssl', p.imap_ssl !== false);
+  setCheck('pop3_ssl', p.pop3_ssl !== false);
+  setCheck('smtp_ssl', p.smtp_ssl !== false);
+}
+
+function emailEditAccount(aid) {
+  emailAddAccountModal(aid);
+}
+
+async function emailSaveAccount(editId) {
+  const g = id => document.getElementById('eaf-' + id);
+  const val = id => g(id)?.value.trim() || '';
+  const num = id => parseInt(g(id)?.value || '0') || 0;
+  const chk = id => g(id)?.checked ?? true;
+  const proto = document.querySelector('input[name="eaf-proto"]:checked')?.value || 'imap';
+
+  const body = {
+    name: val('name'), email_address: val('email'), protocol: proto,
+    imap_host: val('imap_host'), imap_port: num('imap_port'), imap_ssl: chk('imap_ssl'),
+    pop3_host: val('pop3_host'), pop3_port: num('pop3_port'), pop3_ssl: chk('pop3_ssl'),
+    smtp_host: val('smtp_host'), smtp_port: num('smtp_port'), smtp_ssl: chk('smtp_ssl'),
+    username: val('username'), password: val('password'),
+  };
+
+  if (!body.email_address) { alert('请填写邮箱地址'); return; }
+  if (!editId && !body.password) { alert('请填写密码'); return; }
+
+  try {
+    if (editId) {
+      await api('PUT', `/email/accounts/${editId}`, body);
+    } else {
+      await api('POST', '/email/accounts', body);
+    }
+    dcCloseModal();
+    emailShowAccounts();
+    emailLoadAccounts();
+  } catch(e) { alert('保存失败: ' + e.message); }
+}
+
 // SYSADMIN — 系统设置
 // ============================================================
 
@@ -7532,6 +8937,9 @@ async function loadSysAdmin(content, actions) {
       <button id="sa-tab-features" onclick="saSwitchTab('features')"
         style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
                font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">🔧 功能配置</button>
+      <button id="sa-tab-email" onclick="saSwitchTab('email')"
+        style="padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;
+               font-size:14px;font-weight:500;color:var(--text3);cursor:pointer">📧 邮件设置</button>
     </div>
 
     <!-- 系统信息面板 -->
@@ -7561,13 +8969,20 @@ async function loadSysAdmin(content, actions) {
         <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
       </div>
     </div>
+
+    <!-- 邮件设置面板 -->
+    <div id="sa-panel-email" style="display:none">
+      <div id="sa-email-body">
+        <div style="padding:40px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>
+      </div>
+    </div>
   </div>`;
 
   saLoadSysInfo();
 }
 
 function saSwitchTab(tab) {
-  ['info','company','settings','features'].forEach(t => {
+  ['info','company','settings','features','email'].forEach(t => {
     const btn   = document.getElementById(`sa-tab-${t}`);
     const panel = document.getElementById(`sa-panel-${t}`);
     const isActive = t === tab;
@@ -7582,6 +8997,7 @@ function saSwitchTab(tab) {
   if (tab === 'company')  saLoadCompany();
   if (tab === 'settings') saLoadSettings();
   if (tab === 'features') saLoadFeatures();
+  if (tab === 'email')    saLoadEmailSettings();
 }
 
 // ── 系统信息 ─────────────────────────────────────────────────
@@ -7668,12 +9084,42 @@ async function saLoadSysInfo() {
         </tr>` +
         row('构建日期', d.go.build_time  || '—') +
         row('协程数',   d.go.goroutines) +
-        row('程序内存', `${d.go.mem_alloc_mb} MB（堆）/ ${d.go.mem_sys_mb} MB（系统申请）`) +
+        `<tr>
+          <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">程序内存</td>
+          <td style="padding:9px 16px;font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:10px">
+            <span id="sa-mem-val">${d.go.mem_alloc_mb} MB（已使用）/ ${d.go.mem_sys_mb} MB（共申请）</span>
+            <button onclick="saRunGC(this)" title="手动触发 GC 释放内存"
+              style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);
+                     border-radius:5px;color:var(--text2);font-size:12px;cursor:pointer;
+                     flex-shrink:0;white-space:nowrap"
+              onmouseenter="this.style.background='var(--bg2)'"
+              onmouseleave="this.style.background='var(--bg3)'">🗑️ 释放</button>
+          </td>
+        </tr>` +
         row('版权所有', d.go.copyright || '—')
       );
 
   } catch(e) {
     if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+// ── 手动 GC ──────────────────────────────────────────────────
+async function saRunGC(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '回收中…';
+  try {
+    const res = await api('POST', '/admin/gc');
+    // 更新内存显示
+    const memEl = document.getElementById('sa-mem-val');
+    if (memEl) memEl.textContent = `${res.mem_alloc_mb} MB（已使用）/ ${res.mem_sys_mb} MB（共申请）`;
+    const freed = parseFloat(res.freed_mb);
+    btn.textContent = freed > 0 ? `✓ 释放 ${res.freed_mb}MB` : '✓ 已整理';
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+  } catch(e) {
+    btn.textContent = '失败';
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
   }
 }
 
@@ -7744,6 +9190,237 @@ async function saLoadSettings() {
   }
 }
 
+
+// ── 邮件设置（系统管理员）────────────────────────────────────────────────────
+async function saLoadEmailSettings() {
+  const body = document.getElementById('sa-email-body');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)"><div class="spinner"></div></div>';
+  try {
+    const res = await api('GET', '/admin/settings');
+    const s   = res.settings || {};
+    const maxAcc  = s.email_max_accounts  || '3';
+    const syncLim = s.email_sync_limit    || '200';
+    // 优先使用本地编辑中的数据（添加/删除操作后重渲染时不被服务器数据覆盖）
+    let presets;
+    if (window._saEmailPresets !== undefined) {
+      presets = window._saEmailPresets; // 已有本地编辑状态，保持不变
+    } else {
+      try { presets = s.email_server_presets ? JSON.parse(s.email_server_presets) : []; } catch(e) { presets = []; }
+    }
+
+    // 折叠列表渲染：只显示名称行，点编辑展开详情
+    const presetField = (id, label, val, type='text', ph='') =>
+      `<div style="display:grid;grid-template-columns:70px 1fr 70px 60px;gap:6px;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--text3)">${label}</span>
+        <input id="ep-${id}_host-NEW" placeholder="${ph||label+'主机'}" value="${escHtml(val?.host||'')}"
+          style="padding:4px 7px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+        <input id="ep-${id}_port-NEW" type="number" value="${val?.port||0}" placeholder="端口"
+          style="padding:4px 7px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+        <label style="display:flex;align-items:center;gap:3px;font-size:12px;color:var(--text2);cursor:pointer">
+          <input type="checkbox" id="ep-${id}_ssl-NEW" ${val?.ssl!==false?'checked':''}> SSL
+        </label>
+      </div>`;
+
+    const renderPresetForm = (p, idx) => {
+      const isNew = idx === 'NEW';
+      const nameVal = escHtml(p.name||'');
+      const fld = (id, label, host, port, ssl, ph) =>
+        `<div style="display:grid;grid-template-columns:56px 1fr 64px 50px;gap:5px;align-items:center;margin-bottom:5px">
+          <span style="font-size:11px;color:var(--text3);white-space:nowrap">${label}</span>
+          <input id="ep-${id}_host-${idx}" value="${escHtml(host||'')}" placeholder="${ph||label+'主机'}"
+            style="padding:4px 7px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+          <input id="ep-${id}_port-${idx}" type="number" value="${port||0}" placeholder="端口"
+            style="padding:4px 7px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+          <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:var(--text2);cursor:pointer">
+            <input type="checkbox" id="ep-${id}_ssl-${idx}" ${ssl!==false?'checked':''}> SSL
+          </label>
+        </div>`;
+      return `
+        <div style="padding:10px 12px;border-top:1px solid var(--border);background:var(--bg1)">
+          <div style="margin-bottom:8px">
+            <input id="ep-name-${idx}" value="${nameVal}" placeholder="配置名称（如：公司邮件服务器）"
+              style="width:100%;padding:5px 8px;background:var(--bg3);border:1px solid var(--border);
+                     border-radius:6px;color:var(--text);font-size:13px;box-sizing:border-box">
+          </div>
+          ${fld('imap', 'IMAP', p.imap_host, p.imap_port||993, p.imap_ssl, 'imap.example.com')}
+          ${fld('pop3', 'POP3', p.pop3_host, p.pop3_port||995, p.pop3_ssl, 'pop3.example.com')}
+          ${fld('smtp', 'SMTP', p.smtp_host, p.smtp_port||465, p.smtp_ssl, 'smtp.example.com')}
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+            ${isNew
+              ? `<button class="btn btn-sm" onclick="saEmailCancelNew()">取消</button>
+                 <button class="btn btn-primary btn-sm" onclick="saEmailSaveNew()">💾 保存</button>`
+              : `<button class="btn btn-sm" onclick="saEmailTogglePreset(${idx})">收起</button>
+                 <button class="btn btn-primary btn-sm" onclick="saEmailSaveOne(${idx},this)">💾 保存</button>`
+            }
+          </div>
+        </div>`;
+    };
+
+    const renderPresets = () => {
+      if (!presets.length) return '<div style="color:var(--text3);font-size:13px;padding:4px 0">暂无预设，点右上角「＋ 添加」新建</div>';
+      return presets.map((p, i) => `
+        <div id="ep-item-${i}" style="border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden;background:var(--bg2)">
+          <div style="display:flex;align-items:center;padding:10px 14px;cursor:pointer"
+               onclick="saEmailTogglePreset(${i})">
+            <span style="flex:1;font-size:13px;color:var(--text);font-weight:500">
+              ${escHtml(p.name||'（未命名）')}
+            </span>
+            <span style="font-size:11px;color:var(--text3);margin-right:10px">
+              ${p.smtp_host ? escHtml(p.smtp_host) : '未配置SMTP'}
+            </span>
+            <button onclick="event.stopPropagation();saEmailRemovePreset(${i})"
+              style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;padding:2px 4px"
+              title="删除">🗑</button>
+            <span style="font-size:11px;color:var(--text3);margin-left:6px" id="ep-arrow-${i}">▶</span>
+          </div>
+          <div id="ep-detail-${i}" style="display:none">
+            ${renderPresetForm(p, i)}
+          </div>
+        </div>`).join('');
+    };
+
+    window._saEmailPresets = presets;
+
+    body.innerHTML = `
+      <!-- 基本参数 -->
+      <div class="card" style="max-width:680px;padding:0;overflow:hidden;margin-bottom:16px">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent)">📧 邮件基本设置</div>
+        <div style="padding:16px 20px">
+          <div style="display:flex;align-items:center;gap:16px;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="width:140px;flex-shrink:0;font-size:13px;color:var(--text3)">每用户最大邮箱数</div>
+            <input id="sa-email-max" type="number" min="1" max="10" value="${maxAcc}"
+              style="width:80px;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+          <div style="display:flex;align-items:center;gap:16px;padding:10px 0">
+            <div style="width:140px;flex-shrink:0;font-size:13px;color:var(--text3)">每次同步邮件数</div>
+            <input id="sa-email-sync" type="number" min="50" max="1000" value="${syncLim}"
+              style="width:80px;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          </div>
+        </div>
+        <div style="padding:10px 20px 16px;display:flex;justify-content:flex-end">
+          <button class="btn btn-primary btn-sm" onclick="saEmailSaveBasic(this)">💾 保存</button>
+        </div>
+      </div>
+
+      <!-- 预设服务器 -->
+      <div class="card" style="max-width:680px;padding:0;overflow:hidden">
+        <div style="padding:12px 16px;background:var(--bg3);border-bottom:1px solid var(--border);
+                    font-size:13px;font-weight:700;color:var(--accent);display:flex;align-items:center;justify-content:space-between">
+          <span>🖥️ 默认服务器预设</span>
+          <button class="btn btn-sm" onclick="saEmailAddPreset()" style="font-size:12px">＋ 添加</button>
+        </div>
+        <div style="padding:12px 16px">
+          <div style="font-size:12px;color:var(--text3);margin-bottom:10px">
+            用户添加邮箱账户时可从这里快速选择服务器配置，点击名称展开编辑
+          </div>
+          <div id="sa-presets-list">${renderPresets()}</div>
+          <div id="sa-preset-new" style="display:none;border:1px solid var(--accent);border-radius:8px;
+               overflow:hidden;background:var(--bg2);margin-top:6px">
+            <div style="padding:10px 14px;background:var(--bg3);font-size:13px;font-weight:500;color:var(--accent)">
+              ＋ 新建预设
+            </div>
+            ${renderPresetForm({}, 'NEW')}
+          </div>
+        </div>
+      </div>`;
+  } catch(e) {
+    if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
+  }
+}
+
+async function saEmailSaveBasic(btn) {
+  const maxAcc  = document.getElementById('sa-email-max')?.value || '3';
+  const syncLim = document.getElementById('sa-email-sync')?.value || '200';
+  try {
+    await api('PUT', '/admin/settings', { email_max_accounts: maxAcc, email_sync_limit: syncLim });
+    const orig = btn.textContent;
+    btn.textContent = '✓ 已保存'; btn.disabled = true;
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
+// 展开/收起单个预设
+function saEmailTogglePreset(idx) {
+  const detail = document.getElementById(`ep-detail-${idx}`);
+  const arrow  = document.getElementById(`ep-arrow-${idx}`);
+  if (!detail) return;
+  const isOpen = detail.style.display !== 'none';
+  detail.style.display = isOpen ? 'none' : '';
+  if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
+}
+
+// 显示新建表单
+function saEmailAddPreset() {
+  const newDiv = document.getElementById('sa-preset-new');
+  if (newDiv) newDiv.style.display = '';
+}
+
+// 取消新建
+function saEmailCancelNew() {
+  const newDiv = document.getElementById('sa-preset-new');
+  if (newDiv) newDiv.style.display = 'none';
+}
+
+// 保存新建的预设
+async function saEmailSaveNew() {
+  const g = (k) => document.getElementById(`ep-${k}-NEW`);
+  const preset = {
+    name:      g('name')?.value.trim() || '',
+    imap_host: g('imap_host')?.value.trim() || '',
+    imap_port: parseInt(g('imap_port')?.value || '993'),
+    imap_ssl:  g('imap_ssl')?.checked ?? true,
+    pop3_host: g('pop3_host')?.value.trim() || '',
+    pop3_port: parseInt(g('pop3_port')?.value || '995'),
+    pop3_ssl:  g('pop3_ssl')?.checked ?? true,
+    smtp_host: g('smtp_host')?.value.trim() || '',
+    smtp_port: parseInt(g('smtp_port')?.value || '465'),
+    smtp_ssl:  g('smtp_ssl')?.checked ?? true,
+  };
+  if (!preset.name) { alert('请填写配置名称'); return; }
+  const presets = [...(window._saEmailPresets || []), preset];
+  await saEmailPersistPresets(presets);
+}
+
+// 保存单条编辑
+async function saEmailSaveOne(idx, btn) {
+  const g = (k) => document.getElementById(`ep-${k}-${idx}`);
+  const preset = {
+    name:      g('name')?.value.trim() || '',
+    imap_host: g('imap_host')?.value.trim() || '',
+    imap_port: parseInt(g('imap_port')?.value || '993'),
+    imap_ssl:  g('imap_ssl')?.checked ?? true,
+    pop3_host: g('pop3_host')?.value.trim() || '',
+    pop3_port: parseInt(g('pop3_port')?.value || '995'),
+    pop3_ssl:  g('pop3_ssl')?.checked ?? true,
+    smtp_host: g('smtp_host')?.value.trim() || '',
+    smtp_port: parseInt(g('smtp_port')?.value || '465'),
+    smtp_ssl:  g('smtp_ssl')?.checked ?? true,
+  };
+  if (!preset.name) { alert('请填写配置名称'); return; }
+  const presets = [...(window._saEmailPresets || [])];
+  presets[idx] = preset;
+  await saEmailPersistPresets(presets);
+}
+
+// 删除单条
+function saEmailRemovePreset(idx) {
+  if (!confirm('确认删除该预设？')) return;
+  const presets = [...(window._saEmailPresets || [])];
+  presets.splice(idx, 1);
+  saEmailPersistPresets(presets);
+}
+
+// 统一持久化：保存到服务器后刷新列表
+async function saEmailPersistPresets(presets) {
+  try {
+    await api('PUT', '/admin/settings', { email_server_presets: JSON.stringify(presets) });
+    window._saEmailPresets = undefined; // 清除本地缓存，从服务器重新加载
+    await saLoadEmailSettings();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
 // ── 功能配置 ─────────────────────────────────────────────────
 async function saLoadFeatures() {
   const body = document.getElementById('sa-features-body');
@@ -7761,6 +9438,7 @@ async function saLoadFeatures() {
       ]},
       { label: '通讯', items: [
         { id: 'chat',       icon: '💬', label: '聊天' },
+        { id: 'email',      icon: '📧', label: '电子邮件' },
         { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
       ]},
       { label: '业务', items: [
@@ -7859,7 +9537,7 @@ async function saFfSave(btn) {
     if (sidebar) sidebar.outerHTML = renderSidebar();
     // 重新绑定侧边栏事件
     document.querySelectorAll('.nav-item[data-page]').forEach(el => {
-      el.addEventListener('click', () => { state.page = el.dataset.page; render(); loadPage(); });
+      el.addEventListener('click', () => { state.page = el.dataset.page; render(); });
     });
     const orig = btn.textContent;
     btn.textContent = '✓ 已保存';
@@ -8002,6 +9680,9 @@ const _chat = {
 
 // ── WebSocket ────────────────────────────────────────────────
 function chatWsConnect() {
+  // 聊天功能被禁用时不连接
+  const ff = state.featureFlags || {};
+  if (Object.keys(ff).length > 0 && ff['chat'] === false) return;
   if (_chat.ws && _chat.ws.readyState <= 1) return;
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${wsProto}://${location.host}/ws/chat?token=${state.token}`);
@@ -9011,7 +10692,7 @@ function chatShowErr(msg) {
   setTimeout(() => t.remove(), 3000);
 }
 
-// Start WS when logged in
+// Start WS when logged in（聊天功能启用时才连接）
 if (state.token) chatWsConnect();
 
 
@@ -9965,10 +11646,37 @@ function sfCloseModal() { document.getElementById('sf-modal-overlay')?.remove();
 
 
 // ============================================================
+// ── 邮件同步：页面可见性监听 ──────────────────────────────────────────────────
+// 标签页隐藏/关闭时停止同步；恢复可见时根据当前页面恢复对应档位
+document.addEventListener('visibilitychange', () => {
+  if (typeof emailSyncAll !== 'function') return;
+  if (document.hidden) {
+    // 标签页不可见（切到其他标签/最小化/关闭）→ 停止定时器
+    emailStopSyncTimer();
+  } else {
+    // 标签页恢复可见 → 根据当前页面恢复档位
+    if (!state.token || !state.user) return;
+    if (state.page === 'email') {
+      emailStartSyncTimer(); // 邮件页面：快速30秒
+    } else {
+      emailSlowSyncTimer();  // 其他页面：慢速240秒
+    }
+  }
+});
+
+// 退出登录时也停止定时器（在 doLogout 里补充调用）
+const _origDoLogout = typeof doLogout === 'function' ? doLogout : null;
+
 // INIT
 // ============================================================
 render();
-if (state.token && state.user) loadPage();
+if (state.token && state.user) {
+  loadPage();
+  // 已登录时启动慢速后台同步（进入邮件页面后会自动切换到快速）
+  setTimeout(() => {
+    if (typeof emailSlowSyncTimer === 'function') emailSlowSyncTimer();
+  }, 2000); // 延迟2秒等页面初始化完成
+}
 
 </script>
 </body>
