@@ -68,7 +68,7 @@ jobs:
         with:
           account: user               # 个人账号固定填 user（不是用户名！），组织账号才填组织名
           token: ${{ secrets.PAT }}       # 必须用 PAT，GITHUB_TOKEN 无 delete:packages 权限
-          image-names: claw_host
+          image-names: aerp
           image-tags: "!latest"           # 排除 latest 标签，只清理 untagged 旧版本
           cut-off: 2h                     # 删除 2 小时前的旧版本，保护刚推送的新层
           keep-n-most-recent: ${{ env.KEEP_VERSIONS }}
