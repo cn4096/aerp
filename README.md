@@ -1,4 +1,7 @@
 ## claw_host网盘 Docker启动
++ 测试：docker run --rm --network host ghcr.io/cn4096/claw_host:latest 端口：7860
+
++ 数据保存到本地并运行：
 
 ```
  ## 下载/更新镜像
