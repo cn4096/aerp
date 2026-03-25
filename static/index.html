@@ -476,6 +476,8 @@
     .topbar-actions .btn { padding: 6px 8px; font-size: 16px; }
     .page-title { font-size: 14px; }
   }
+  /* 书签卡片操作按钮：非编辑模式下 hover 显示，编辑模式常显 */
+  /* 书签操作按钮：仅编辑模式下显示，普通模式完全隐藏 */
 </style>
 <!-- ECharts：仅报表中心使用，CDN缓存后无感知 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.4.3/echarts.min.js"></script>
@@ -748,6 +750,7 @@ function renderSidebar() {
     { id: 'chat', icon: '💬', label: '聊天' },
     { id: 'email', icon: '📧', label: '电子邮件' },
     { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
+    { id: 'bookmarks', icon: '🔖', label: '我的网址' },
     { section: '业务' },
     { id: 'products',   icon: '📦', label: '产品管理',  perm: 'products' },
     { id: 'inventory',  icon: '🏭', label: '产品库存',  perm: 'inventory' },
@@ -1144,6 +1147,7 @@ async function loadPage() {
       case 'bank': await loadBank(content, actions); break;
       case 'reports': await loadReports(content, actions); break;
       case 'datacenter': await loadDataCenter(content, actions); break;
+      case 'bookmarks':  await loadBookmarks(content, actions); break;
       case 'users': await loadUsers(content, actions); break;
       case 'templates': await loadTemplates(content, actions); break;
       case 'email':    await loadEmail(content, actions); break;
@@ -9440,6 +9444,7 @@ async function saLoadFeatures() {
         { id: 'chat',       icon: '💬', label: '聊天' },
         { id: 'email',      icon: '📧', label: '电子邮件' },
         { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
+        { id: 'bookmarks',  icon: '🔖', label: '我的网址' },
       ]},
       { label: '业务', items: [
         { id: 'products',   icon: '📦', label: '产品管理' },
@@ -11666,6 +11671,444 @@ document.addEventListener('visibilitychange', () => {
 
 // 退出登录时也停止定时器（在 doLogout 里补充调用）
 const _origDoLogout = typeof doLogout === 'function' ? doLogout : null;
+
+// ============================================================
+// 我的网址（书签）+ 备忘录
+// ============================================================
+
+let _bkList      = [];   // 全部书签
+let _bkCategory  = '';   // 当前分类筛选（空=全部）
+let _bkSearch    = '';   // 搜索关键词
+let _bkDragId    = null; // 拖拽中的书签 id
+let _bkDragOver  = null; // 拖拽目标 id
+
+const BK_EMOJIS = ['🌐','📌','⭐','🔗','📎','💼','🛒','📚','🎯','🔧',
+                   '🎵','🎮','📷','✈️','🏠','💡','🔒','📊','🗂️','💬'];
+
+let _bkEditMode = false; // 编辑模式开关
+let _bkView     = 'list'; // 显示模式：list=列表，cat=分类
+
+async function loadBookmarks(content, actions) {
+  _bkEditMode = false;
+  // 从 localStorage 恢复显示模式
+  try { _bkView = localStorage.getItem('bk_view') || 'list'; } catch(e) { _bkView = 'list'; }
+  // 顶部栏：搜索居中 + 右侧操作按钮
+  actions.innerHTML = `
+    <input id="bk-search" placeholder="🔍 搜索…"
+      oninput="bkFilter()" onkeydown="bkSearchKey(event)"
+      style="padding:6px 12px;background:var(--bg1);border:1px solid var(--border);
+             border-radius:20px;color:var(--text);font-size:13px;width:240px;outline:none">
+    <button class="btn btn-sm" id="bk-view-btn" onclick="bkToggleView()" title="切换显示方式">${_bkView==='cat'?'⊞ 分类':'☰ 列表'}</button>
+    <button class="btn btn-sm" id="bk-edit-btn" onclick="bkToggleEdit()">✏️ 编辑</button>
+    <button class="btn btn-sm" onclick="bkOpenNotebook()">📝 备忘录</button>
+    <button class="btn btn-primary btn-sm" onclick="bkOpenEdit(null)">＋ 添加网址</button>`;
+
+  content.innerHTML = `
+    <div style="padding:16px 20px;max-width:1200px;margin:0 auto">
+      <!-- 分类 tabs -->
+      <div id="bk-cats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px"></div>
+      <!-- 卡片网格 -->
+      <div id="bk-grid" style="display:grid;grid-template-columns:repeat(10,minmax(0,1fr));
+           gap:12px;max-width:1200px"></div>
+      <div id="bk-empty" style="display:none;padding:60px;text-align:center;color:var(--text3)">
+        <div style="font-size:40px;margin-bottom:12px">🔖</div>
+        <div style="font-size:14px">还没有网址，点右上角「＋ 添加网址」开始收藏</div>
+      </div>
+    </div>`;
+
+  await bkReload();
+}
+
+// 搜索回车：只剩一条时直接打开
+function bkSearchKey(e) {
+  if (e.key !== 'Enter') return;
+  let list = _bkList;
+  if (_bkCategory) list = list.filter(b => b.category === _bkCategory);
+  const kw = document.getElementById('bk-search')?.value.toLowerCase() || '';
+  if (kw) list = list.filter(b =>
+    b.name.toLowerCase().includes(kw) ||
+    b.url.toLowerCase().includes(kw)  ||
+    b.remark.toLowerCase().includes(kw));
+  if (list.length === 1) window.open(list[0].url, '_blank');
+}
+
+// 显示模式切换
+function bkToggleView() {
+  _bkView = _bkView === 'list' ? 'cat' : 'list';
+  _bkCategory = '';
+  try { localStorage.setItem('bk_view', _bkView); } catch(e) {}
+  const btn = document.getElementById('bk-view-btn');
+  if (btn) btn.textContent = _bkView === 'cat' ? '⊞ 分类' : '☰ 列表';
+  bkRenderCats();
+  bkRender();
+}
+
+// 编辑模式切换
+function bkToggleEdit() {
+  _bkEditMode = !_bkEditMode;
+  const btn = document.getElementById('bk-edit-btn');
+  if (btn) {
+    btn.textContent = _bkEditMode ? '✓ 完成' : '✏️ 编辑';
+    btn.className = _bkEditMode ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  }
+  bkRender();
+}
+
+async function bkReload() {
+  const res = await api('GET', '/bookmarks');
+  _bkList = res.bookmarks || [];
+  bkRenderCats();
+  bkRender();
+}
+
+function bkFilter() {
+  _bkSearch = document.getElementById('bk-search')?.value.toLowerCase() || '';
+  bkRender();
+}
+
+function bkSetCat(cat) {
+  _bkCategory = cat;
+  bkRenderCats();
+  bkRender();
+}
+
+function bkRenderCats() {
+  const el = document.getElementById('bk-cats');
+  if (!el) return;
+  // 方式B：隐藏tabs，分组标题直接显示在卡片区域
+  if (_bkView === 'cat') {
+    el.style.display = 'none';
+    return;
+  }
+  // 方式A：显示分类tabs
+  el.style.display = 'flex';
+  const cats = ['', ...new Set(_bkList.map(b => b.category).filter(Boolean))];
+  el.innerHTML = cats.map(c => `
+    <button onclick="bkSetCat('${escHtml(c)}')"
+      style="padding:4px 12px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid var(--border);
+             background:${_bkCategory===c?'var(--accent)':'var(--bg2)'};
+             color:${_bkCategory===c?'#fff':'var(--text2)'}">
+      ${c || '全部'}
+    </button>`).join('');
+}
+
+function bkRender() {
+  const grid  = document.getElementById('bk-grid');
+  const empty = document.getElementById('bk-empty');
+  if (!grid) return;
+
+  let list = _bkList;
+  // 搜索过滤（两种模式都支持）
+  if (_bkSearch) list = list.filter(b =>
+    b.name.toLowerCase().includes(_bkSearch) ||
+    b.url.toLowerCase().includes(_bkSearch)  ||
+    b.remark.toLowerCase().includes(_bkSearch));
+
+  // 方式A：还需按分类tab过滤
+  if (_bkView === 'list' && _bkCategory) {
+    list = list.filter(b => b.category === _bkCategory);
+  }
+
+  if (!list.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  if (_bkView === 'cat') {
+    // 方式B：按分类分组显示（bkRenderByCat 内部处理 grid.style.display）
+    bkRenderByCat(grid, list);
+  } else {
+    // 方式A：恢复 grid display，平铺所有卡片
+    grid.style.display = 'grid';
+    grid.innerHTML = list.map(b => bkCardHtml(b)).join('');
+    bkBindCardEvents(grid);
+  }
+}
+
+// 分类模式渲染
+function bkRenderByCat(grid, list) {
+  // 收集分类顺序：按第一次出现的分类顺序排列，无分类归入末尾
+  const catOrder = [];
+  const catMap = new Map();
+  list.forEach(b => {
+    const cat = b.category || '';
+    if (!catMap.has(cat)) { catOrder.push(cat); catMap.set(cat, []); }
+    catMap.get(cat).push(b);
+  });
+  // 有分类的在前，空分类（未分类）在最后
+  catOrder.sort((a, b) => a === '' ? 1 : b === '' ? -1 : 0);
+
+  // 重置 grid 的 display，让分组容器自己管理布局
+  grid.style.display = 'block';
+
+  let html = '';
+  for (const cat of catOrder) {
+    const items = catMap.get(cat);
+    html += `
+      <div style="margin-bottom:28px">
+        <div style="font-size:18px;font-weight:600;color:var(--text);
+                    margin-bottom:12px">${escHtml(cat || '未分类')}</div>
+        <div style="display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:12px">
+          ${items.map(b => bkCardHtml(b)).join('')}
+        </div>
+      </div>`;
+  }
+  grid.innerHTML = html;
+  bkBindCardEvents(grid);
+}
+
+// 抽取单个卡片 HTML
+function bkCardHtml(b) {
+  const icon    = bkIcon(b);
+  const tooltip = escHtml(b.remark || b.url);
+  const actShow = _bkEditMode ? 'flex' : 'none';
+  return `<div id="bk-card-${b.id}" class="bk-card" draggable="${_bkEditMode}"
+    ondragstart="bkDragStart(event,${b.id})"
+    ondragover="bkDragOver(event,${b.id})"
+    ondrop="bkDrop(event,${b.id})"
+    ondragend="bkDragEnd()"
+    title="${tooltip}"
+    style="position:relative;background:var(--bg2);border:1px solid var(--border);
+           border-radius:12px;padding:14px 10px 10px;text-align:center;
+           cursor:${_bkEditMode?'grab':'pointer'};
+           transition:box-shadow .15s,transform .1s;user-select:none;
+           ${_bkEditMode?'outline:1px dashed var(--border)':''}"
+    onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,.18)';this.style.transform='translateY(-2px)'"
+    onmouseleave="this.style.boxShadow='';this.style.transform=''">
+    ${_bkEditMode
+      ? `<div style="display:block;text-decoration:none;color:inherit">
+           <div style="font-size:32px;margin-bottom:6px;line-height:1">${icon}</div>
+           <div style="font-size:12px;color:var(--text);font-weight:500;
+                       overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+                       max-width:90px;margin:0 auto">${escHtml(b.name)}</div>
+           ${b.category?`<div style="font-size:10px;color:var(--text3);margin-top:3px">${escHtml(b.category)}</div>`:''}
+         </div>`
+      : `<a href="${escHtml(b.url)}" target="_blank" rel="noopener"
+            style="display:block;text-decoration:none;color:inherit"
+            onclick="event.stopPropagation()">
+           <div style="font-size:32px;margin-bottom:6px;line-height:1">${icon}</div>
+           <div style="font-size:12px;color:var(--text);font-weight:500;
+                       overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+                       max-width:90px;margin:0 auto">${escHtml(b.name)}</div>
+           ${b.category?`<div style="font-size:10px;color:var(--text3);margin-top:3px">${escHtml(b.category)}</div>`:''}
+         </a>`
+    }
+    <div style="position:absolute;top:4px;right:4px;display:${_bkEditMode?'flex':'none'};gap:2px"
+         class="bk-actions" id="bk-act-${b.id}">
+      <button onclick="event.stopPropagation();bkOpenEdit(${b.id})"
+        style="background:var(--bg3);border:none;border-radius:4px;cursor:pointer;
+               font-size:11px;padding:2px 5px;color:var(--text2)">✏️</button>
+      <button onclick="event.stopPropagation();bkDelete(${b.id})"
+        style="background:var(--bg3);border:none;border-radius:4px;cursor:pointer;
+               font-size:11px;padding:2px 5px;color:var(--red)">🗑</button>
+    </div>
+  </div>`;
+}
+
+// hover 事件绑定（普通模式hover显示按钮）
+function bkBindCardEvents(container) {
+  // 显示/隐藏逻辑已改用 CSS .bk-card:hover .bk-actions-hover，无需 JS 事件绑定
+}
+
+function bkIcon(b) {
+  if (b.icon && b.icon.trim()) return escHtml(b.icon);
+  // 尝试用 img 加载 favicon，失败时显示默认 emoji
+  const domain = (() => { try { return new URL(b.url).hostname; } catch(e) { return ''; } })();
+  if (!domain) return '🌐';
+  const fallback = BK_EMOJIS[Math.abs(b.id * 7) % BK_EMOJIS.length];
+  return `<img src="https://www.google.com/s2/favicons?domain=${domain}&sz=32"
+    style="width:32px;height:32px;border-radius:6px;object-fit:contain"
+    onerror="this.outerHTML='${fallback}'"
+    loading="lazy">`;
+}
+
+// ── 拖拽排序 ──────────────────────────────────────────────────
+function bkDragStart(e, id) {
+  _bkDragId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => {
+    const el = document.getElementById(`bk-card-${id}`);
+    if (el) el.style.opacity = '0.4';
+  }, 0);
+}
+
+function bkDragOver(e, id) {
+  e.preventDefault();
+  _bkDragOver = id;
+  document.querySelectorAll('[id^=bk-card-]').forEach(el => el.style.outline = '');
+  const t = document.getElementById(`bk-card-${id}`);
+  if (t && id !== _bkDragId) t.style.outline = '2px solid var(--accent)';
+}
+
+function bkDrop(e, toId) {
+  e.preventDefault();
+  const fromId = _bkDragId;
+  if (!fromId || fromId === toId) return;
+  // 在内存里重排
+  const fromIdx = _bkList.findIndex(b => b.id === fromId);
+  const toIdx   = _bkList.findIndex(b => b.id === toId);
+  if (fromIdx < 0 || toIdx < 0) return;
+  const [moved] = _bkList.splice(fromIdx, 1);
+  _bkList.splice(toIdx, 0, moved);
+  // 更新 sort_order
+  _bkList.forEach((b, i) => b.sort_order = i);
+  bkRender();
+  // 持久化
+  api('PUT', '/bookmarks/reorder', {
+    orders: _bkList.map((b, i) => ({ id: b.id, order: i }))
+  }).catch(() => {});
+}
+
+function bkDragEnd() {
+  _bkDragId = null; _bkDragOver = null;
+  document.querySelectorAll('[id^=bk-card-]').forEach(el => {
+    el.style.opacity = '';
+    el.style.outline = '';
+  });
+}
+
+// ── 新增/编辑弹窗 ─────────────────────────────────────────────
+function bkOpenEdit(id) {
+  const b = id ? _bkList.find(x => x.id === id) : null;
+  const cats = [...new Set(_bkList.map(x => x.category).filter(Boolean))];
+  const catOpts = cats.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('');
+  const randEmoji = BK_EMOJIS[Math.floor(Math.random() * BK_EMOJIS.length)];
+
+  showModal(`
+  <div class="modal">
+    <div class="modal-header">${b ? '编辑网址' : '添加网址'}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>名称 <span style="color:var(--red)">*</span></label>
+        <input id="bk-f-name" value="${escHtml(b?.name||'')}" placeholder="如：GitHub">
+      </div>
+      <div class="form-group">
+        <label>网址 <span style="color:var(--red)">*</span></label>
+        <input id="bk-f-url" value="${escHtml(b?.url||'')}" placeholder="https://github.com">
+      </div>
+      <div class="form-group">
+        <label>分类</label>
+        <input id="bk-f-cat" value="${escHtml(b?.category||'')}" placeholder="如：开发工具"
+          list="bk-cat-list">
+        <datalist id="bk-cat-list">${catOpts}</datalist>
+      </div>
+      <div class="form-group">
+        <label>图标（emoji 或留空自动获取）</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="bk-f-icon" value="${escHtml(b?.icon||'')}" placeholder="${randEmoji}"
+            style="flex:1">
+          <div style="display:flex;gap:4px;flex-wrap:wrap;max-width:200px">
+            ${BK_EMOJIS.slice(0,10).map(e =>
+              `<span onclick="document.getElementById('bk-f-icon').value='${e}'"
+                style="font-size:20px;cursor:pointer;padding:2px" title="${e}">${e}</span>`
+            ).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <input id="bk-f-remark" value="${escHtml(b?.remark||'')}" placeholder="可选备注">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="bkSave(${id||0})">💾 保存</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+  setTimeout(() => document.getElementById('bk-f-name')?.focus(), 50);
+}
+
+async function bkSave(id) {
+  const name   = document.getElementById('bk-f-name')?.value.trim();
+  const url    = document.getElementById('bk-f-url')?.value.trim();
+  const cat    = document.getElementById('bk-f-cat')?.value.trim();
+  const icon   = document.getElementById('bk-f-icon')?.value.trim();
+  const remark = document.getElementById('bk-f-remark')?.value.trim();
+  if (!name) { alert('请填写名称'); return; }
+  if (!url)  { alert('请填写网址'); return; }
+  const payload = { name, url, category: cat, icon, remark,
+                    sort_order: id ? (_bkList.find(b=>b.id===id)?.sort_order||0) : _bkList.length };
+  try {
+    if (id) {
+      await api('PUT', `/bookmarks/${id}`, payload);
+    } else {
+      await api('POST', '/bookmarks', payload);
+    }
+    closeModal();
+    await bkReload();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
+async function bkDelete(id) {
+  const b = _bkList.find(x => x.id === id);
+  if (!confirm(`确认删除「${b?.name}」？`)) return;
+  await api('DELETE', `/bookmarks/${id}`);
+  await bkReload();
+}
+
+// ── 备忘录 ────────────────────────────────────────────────────
+let _nbSaveTimer = null;
+
+async function bkOpenNotebook() {
+  const res = await api('GET', '/notebook');
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">📝 备忘录
+      <span style="font-size:11px;color:var(--text3);margin-left:8px" id="nb-status">自动保存</span>
+      <span class="modal-close" onclick="nbClose()">×</span>
+    </div>
+    <div class="modal-body" style="padding:0">
+      <textarea id="nb-content"
+        placeholder="在这里记录网址的用户名、密码提示、使用说明等信息…"
+        oninput="nbAutoSave()"
+        style="width:100%;height:400px;padding:16px;font-size:14px;line-height:1.8;
+               background:var(--bg1);border:none;resize:vertical;color:var(--text);
+               font-family:inherit;box-sizing:border-box;outline:none"
+        >${escHtml(res.content||'')}</textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="nbClose()">关闭</button>
+      <button class="btn btn-primary" onclick="nbSaveAndClose()">💾 保存</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = nbClose;
+}
+
+function nbAutoSave() {
+  const st = document.getElementById('nb-status');
+  if (st) st.textContent = '未保存…';
+  if (_nbSaveTimer) clearTimeout(_nbSaveTimer);
+  _nbSaveTimer = setTimeout(nbSave, 2000);
+}
+
+async function nbSave() {
+  const content = document.getElementById('nb-content')?.value ?? '';
+  const st = document.getElementById('nb-status');
+  try {
+    await api('POST', '/notebook', { content });
+    if (st) st.textContent = '已保存 ✓';
+    return true;
+  } catch(e) {
+    if (st) st.textContent = '保存失败';
+    return false;
+  }
+}
+
+async function nbSaveAndClose() {
+  const ok = await nbSave();
+  if (ok) {
+    if (_nbSaveTimer) { clearTimeout(_nbSaveTimer); _nbSaveTimer = null; }
+    closeModal();
+  }
+}
+
+function nbClose() {
+  if (_nbSaveTimer) { clearTimeout(_nbSaveTimer); _nbSaveTimer = null; }
+  nbSave().finally(() => closeModal());
+}
 
 // INIT
 // ============================================================
