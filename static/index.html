@@ -765,7 +765,6 @@ function renderSidebar() {
     { id: 'datacenter', icon: '🗄️', label: '数据中心' },
     { section: '系统' },
     { id: 'users',     icon: '👥', label: '员工管理', adminOnly: true },
-    { id: 'templates', icon: '📄', label: '合同模板', adminOnly: true },
     { id: 'sysadmin',  icon: '⚙️', label: '系统设置', adminOnly: true },
   ];
   // feature_flags 过滤：null/空对象 = 全开；有值时按 id 查 bool
@@ -824,7 +823,7 @@ function getPageTitle() {
   const titles = {
     dashboard: '仪表盘', products: '产品管理', inventory: '产品库存',
     customers: '客户管理', quotations: '报价系统', contracts: '合同管理',
-    finance: '财务管理', bank: '银行流水-现金流', users: '员工管理', templates: '合同模板',
+    finance: '财务管理', bank: '银行流水-现金流', users: '员工管理',
     reports: '报表中心', datacenter: '数据中心',
     chat: '聊天', email: '电子邮件', sharefiles: '企业网盘',
     sysadmin: '系统设置',
@@ -1051,7 +1050,7 @@ function noPermHtml(page) {
   const titles = {
     products:'产品管理', inventory:'库存管理', customers:'客户管理',
     quotations:'报价系统', contracts:'合同管理', finance:'财务管理',
-    bank:'银行流水', chat:'即时通讯', users:'员工管理', templates:'合同模板',
+    bank:'银行流水', chat:'即时通讯', users:'员工管理',
     reports:'报表中心', sharefiles:'企业网盘', datacenter:'数据中心',
   };
   return `<div class="empty-state" style="padding:80px 0">
@@ -1149,7 +1148,6 @@ async function loadPage() {
       case 'datacenter': await loadDataCenter(content, actions); break;
       case 'bookmarks':  await loadBookmarks(content, actions); break;
       case 'users': await loadUsers(content, actions); break;
-      case 'templates': await loadTemplates(content, actions); break;
       case 'email':    await loadEmail(content, actions); break;
       case 'sysadmin': await loadSysAdmin(content, actions); break;
       case 'chat': await loadChat(content, actions); break;
@@ -1832,6 +1830,7 @@ function renderProductRows(products, canEdit) {
     <td>${p.unit}</td>
     ${canEdit ? `<td>
       <button class="btn btn-sm" data-action="edit-product" data-id="${p.id}">编辑</button>
+      <button class="btn btn-sm" data-action="copy-product" data-id="${p.id}" style="margin-left:4px">📋 复制</button>
       <button class="btn btn-sm btn-danger" data-action="del-product" data-id="${p.id}" style="margin-left:4px">删除</button>
     </td>` : ''}
   </tr>`).join('');
@@ -1846,6 +1845,13 @@ function attachProductActions(canEdit) {
       if (p) openProductModal(p);
     });
   });
+  document.querySelectorAll('[data-action=copy-product]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const products = await api('GET', '/products');
+      const p = products.find(x => x.id == btn.dataset.id);
+      if (p) openProductModal({ ...p, id: null }); // 清除id，走新建流程
+    });
+  });
   document.querySelectorAll('[data-action=del-product]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('确定删除？')) return;
@@ -1857,23 +1863,37 @@ function attachProductActions(canEdit) {
 
 function openProductModal(product) {
   const p = product || {};
+  // 读取上次保存的品牌/类型/单位（仅新建时作为默认值）
+  let lastBrand = '', lastType = '', lastUnit = 'PCS';
+  if (!p.id) {
+    try {
+      const saved = JSON.parse(localStorage.getItem('prod_last_fields') || '{}');
+      lastBrand = saved.brand || '';
+      lastType  = saved.type  || '';
+      lastUnit  = saved.unit  || 'PCS';
+    } catch(e) {}
+  }
+  const brandVal = p.brand !== undefined ? (p.brand || '') : lastBrand;
+  const typeVal  = p.type  !== undefined ? (p.type  || '') : lastType;
+  const unitVal  = p.unit  !== undefined ? (p.unit  || 'PCS') : lastUnit;
+
   showModal(`
   <div class="modal">
-    <div class="modal-header">${p.id ? '编辑产品' : '新增产品'}<span class="modal-close" id="modal-close">×</span></div>
+    <div class="modal-header">${p.id ? '编辑产品' : (product?.id===null ? '复制产品' : '新增产品')}<span class="modal-close" id="modal-close">×</span></div>
     <div class="modal-body">
-      <div class="form-group"><label>产品名称 *</label><input id="p-name" value="${p.name||''}" placeholder="如：无线蓝牙耳机 Pro"></div>
+      <div class="form-group"><label>产品名称 *</label><input id="p-name" value="${escHtml(p.name||'')}" placeholder="如：无线蓝牙耳机 Pro"></div>
       <div class="form-row">
-        <div class="form-group"><label>品牌 *</label><input id="p-brand" value="${p.brand||''}"></div>
-        <div class="form-group"><label>型号 *</label><input id="p-model" value="${p.model||''}"></div>
+        <div class="form-group"><label>品牌 *</label><input id="p-brand" value="${escHtml(brandVal)}"></div>
+        <div class="form-group"><label>型号 *</label><input id="p-model" value="${escHtml(p.model||'')}"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>类型</label><input id="p-type" value="${p.type||''}"></div>
-        <div class="form-group"><label>单位</label><input id="p-unit" value="${p.unit||'PCS'}"></div>
+        <div class="form-group"><label>类型</label><input id="p-type" value="${escHtml(typeVal)}"></div>
+        <div class="form-group"><label>单位</label><input id="p-unit" value="${escHtml(unitVal)}"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>单价 (¥)</label><input id="p-price" type="number" step="0.01" value="${p.unit_price||0}"></div>
       </div>
-      <div class="form-group"><label>描述</label><textarea id="p-desc">${p.description||''}</textarea></div>
+      <div class="form-group"><label>描述</label><textarea id="p-desc">${escHtml(p.description||'')}</textarea></div>
     </div>
     <div class="modal-footer">
       <button class="btn" id="modal-cancel">取消</button>
@@ -1884,18 +1904,31 @@ function openProductModal(product) {
   document.getElementById('modal-cancel').onclick = closeModal;
   document.getElementById('modal-save').onclick = async () => {
     const body = {
-      name: document.getElementById('p-name').value.trim(),
-      brand: document.getElementById('p-brand').value.trim(),
-      model: document.getElementById('p-model').value.trim(),
-      type: document.getElementById('p-type').value.trim(),
-      unit: document.getElementById('p-unit').value.trim() || 'PCS',
-      unit_price: parseFloat(document.getElementById('p-price').value) || 0,
+      name:        document.getElementById('p-name').value.trim(),
+      brand:       document.getElementById('p-brand').value.trim(),
+      model:       document.getElementById('p-model').value.trim(),
+      type:        document.getElementById('p-type').value.trim(),
+      unit:        document.getElementById('p-unit').value.trim() || 'PCS',
+      unit_price:  parseFloat(document.getElementById('p-price').value) || 0,
       description: document.getElementById('p-desc').value.trim(),
     };
     if (!body.name || !body.brand || !body.model) return alert('请填写产品名称、品牌和型号');
     try {
-      if (p.id) await api('PUT', '/products/' + p.id, body);
-      else await api('POST', '/products', body);
+      if (p.id) {
+        await api('PUT', '/products/' + p.id, body);
+      } else {
+        await api('POST', '/products', body);
+        // 新建成功后保存品牌/类型/单位到localStorage，供下次新建时预填
+        try {
+          localStorage.setItem('prod_last_fields', JSON.stringify({
+            brand: body.brand,
+            type:  body.type,
+            unit:  body.unit,
+          }));
+        } catch(e) {}
+      }
+      // 清除产品缓存，确保报价单新增时能立即获取新产品
+      if (state.data) state.data.products = null;
       closeModal();
     } catch (e) { alert(e.message); }
   };
@@ -2755,7 +2788,8 @@ let _quoteStatusBadge = null;
 async function loadQuotations(content, actions) {
   const canEdit = state.user.is_admin || hasPermission('quotations');
   actions.innerHTML = (canEdit ? `<button class="btn btn-primary" id="btn-add-quote">＋ <span class="btn-text">新增报价</span></button>` : '')
-    + `<button class="btn" id="btn-export-quotes" onclick="exportQuotations()">📤 <span class="btn-text">导出Excel</span></button>`;
+    + `<button class="btn" onclick="qtOpenTemplateManager()">📋 <span class="btn-text">模板管理</span></button>`
+    + `<button class="btn" id="btn-export-quotes" onclick="exportQuotations()">📤 <span class="btn-text">导出列表</span></button>`;
   if (canEdit) {
     document.getElementById('btn-add-quote')?.addEventListener('click', async () => {
       await preloadData();
@@ -2820,33 +2854,49 @@ function renderQuoteRows(quotes, canEdit, statusMap, statusBadge) {
   if (!quotes.length) return '<tr><td colspan="6"><div class="empty-state"><div class="icon">📋</div>暂无报价</div></td></tr>';
   return quotes.map(q => `
   <tr>
-    <td class="mono" style="color:var(--accent)">${q.quote_number}</td>
+    <td class="mono" style="color:var(--accent);cursor:pointer;text-decoration:underline dotted" onclick="qtPreviewQuote(${q.id})" title="点击查看报价清单">${q.quote_number}</td>
     <td>${q.company_name||'-'}</td>
     <td>${q.date||'-'}</td>
     <td><span class="badge ${statusBadge(q.status)}">${statusMap[q.status]||q.status}</span></td>
     <td class="mono" style="color:var(--green)">¥${q.total_amount?.toFixed(2)||'0.00'}</td>
     ${canEdit ? `<td>
-      <button class="btn btn-sm" data-action="edit-quote" data-id="${q.id}">编辑</button>
+      <button class="btn btn-sm" data-action="view-quote" data-id="${q.id}">查看</button>
+      <button class="btn btn-sm" data-action="edit-quote" data-id="${q.id}" style="margin-left:4px">编辑</button>
+      <button class="btn btn-sm" data-action="copy-quote" data-id="${q.id}" style="margin-left:4px">📋 复制</button>
+      <button class="btn btn-sm" data-action="export-quote" data-id="${q.id}" style="margin-left:4px">📥 导出</button>
       <button class="btn btn-sm btn-danger" data-action="del-quote" data-id="${q.id}" style="margin-left:4px">删除</button>
-    </td>` : ''}
+    </td>` : `<td>
+      <button class="btn btn-sm" data-action="view-quote" data-id="${q.id}">查看</button>
+      <button class="btn btn-sm" data-action="export-quote" data-id="${q.id}" style="margin-left:4px">📥 导出</button>
+    </td>`}
   </tr>`).join('');
 }
 
 function attachQuoteActions(canEdit) {
-  if (!canEdit) return;
-  document.querySelectorAll('[data-action=edit-quote]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const q = await api('GET', '/quotations/' + btn.dataset.id);
-      await preloadData();
-      openQuotationModal(q);
+  if (canEdit) {
+    document.querySelectorAll('[data-action=edit-quote]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const q = await api('GET', '/quotations/' + btn.dataset.id);
+        await preloadData();
+        openQuotationModal(q);
+      });
     });
+    document.querySelectorAll('[data-action=del-quote]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('确定删除？')) return;
+        await api('DELETE', '/quotations/' + btn.dataset.id);
+        loadPage();
+      });
+    });
+  }
+  document.querySelectorAll('[data-action=view-quote]').forEach(btn => {
+    btn.addEventListener('click', () => qtPreviewQuote(btn.dataset.id));
   });
-  document.querySelectorAll('[data-action=del-quote]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('确定删除？')) return;
-      await api('DELETE', '/quotations/' + btn.dataset.id);
-      loadPage();
-    });
+  document.querySelectorAll('[data-action=copy-quote]').forEach(btn => {
+    btn.addEventListener('click', () => qtCopyQuote(btn.dataset.id));
+  });
+  document.querySelectorAll('[data-action=export-quote]').forEach(btn => {
+    btn.addEventListener('click', () => qtOpenExportModal(btn.dataset.id));
   });
 }
 
@@ -2857,50 +2907,131 @@ async function preloadData() {
 
 function openQuotationModal(quote) {
   const q = quote || {};
-  let items = [];
-  try { items = JSON.parse(q.items || '[]'); } catch(e) { items = []; }
-  if (!Array.isArray(items)) items = [];
+  let currentItems = [];
+  try { currentItems = JSON.parse(q.items || '[]'); } catch(e) { currentItems = []; }
+  if (!Array.isArray(currentItems)) currentItems = [];
 
   const customers = state.data.customers || [];
+  const products  = state.data.products  || [];
 
-  const renderItems = (items) => items.map((item, idx) => `
-  <div class="quote-item" id="qi-${idx}">
-    <div class="quote-item-header">
-      <span style="font-weight:600;color:var(--text2)">产品 #${idx+1}${item.name ? ' · <span style=\'color:var(--text)\'>'+item.name+'</span>' : ''}</span>
-      <button class="btn btn-sm btn-danger" data-del-item="${idx}">删除</button>
-    </div>
-    <div class="form-row-3">
-      <div class="form-group"><label>产品名称</label><input class="qi-name" value="${item.name||''}" data-idx="${idx}" placeholder="产品名称"></div>
-      <div class="form-group"><label>品牌</label><input class="qi-brand" value="${item.brand||''}" data-idx="${idx}"></div>
-      <div class="form-group"><label>型号</label><input class="qi-model" value="${item.model||''}" data-idx="${idx}"></div>
-    </div>
-    <div class="form-row-3">
-      <div class="form-group"><label>类型</label><input class="qi-type" value="${item.type||''}" data-idx="${idx}"></div>
-      <div class="form-group"><label>描述</label><input class="qi-desc" value="${item.description||''}" data-idx="${idx}"></div>
-      <div class="form-group"><label>单位</label><input class="qi-unit" value="${item.unit||'PCS'}" data-idx="${idx}"></div>
-    </div>
-    <div class="form-row-3">
-      <div class="form-group"><label>单价 (¥)</label><input class="qi-price" type="number" step="0.01" value="${item.unit_price||0}" data-idx="${idx}"></div>
-      <div class="form-group"><label>数量</label><input class="qi-qty" type="number" value="${item.quantity||1}" data-idx="${idx}"></div>
-      <div class="form-group"><label>总价</label><input class="qi-total" readonly value="${((item.unit_price||0)*(item.quantity||1)).toFixed(2)}" style="color:var(--green)"></div>
-    </div>
-  </div>`).join('');
+  // ── 表格样式 ──
+  const thS = 'background:var(--accent);color:#fff;padding:7px 6px;font-size:11px;font-weight:600;' +
+              'text-align:center;border:1px solid var(--border);white-space:nowrap';
+  const tdS = 'padding:0;border:1px solid var(--border);vertical-align:middle';
+  const inpS = 'width:100%;padding:5px 6px;font-size:12px;border:none;outline:none;' +
+               'background:transparent;color:var(--text);box-sizing:border-box';
+  const numS = inpS + ';text-align:right';
+
+  // ── 产品 datalist ──
+  const datalistHtml = `<datalist id="qm-prod-list">
+    ${products.map(p => `<option value="${escHtml(p.name||'')}"`+
+      ` data-brand="${escHtml(p.brand||'')}"`+
+      ` data-model="${escHtml(p.model||p.type||'')}"`+
+      ` data-price="${p.unit_price||0}"`+
+      ` data-unit="${escHtml(p.unit||'PCS')}">`)
+    .join('')}
+  </datalist>`;
+
+  // ── 渲染表格 ──
+  const renderTable = () => {
+    const rows = currentItems.map((item, i) => {
+      const sub = ((item.unit_price||0)*(item.quantity||1)).toFixed(2);
+      return `<tr id="qm-row-${i}"
+        onmouseenter="this.style.background='var(--bg3)'"
+        onmouseleave="this.style.background=''">
+        <td style="${tdS};text-align:center;color:var(--text3);font-size:11px;width:30px;padding:4px">${i+1}</td>
+        <td style="${tdS};width:1%;white-space:nowrap">
+          <input list="qm-prod-list" value="${escHtml(item.name||'')} "
+            data-row="${i}" data-f="name" style="${inpS};min-width:100px" placeholder="输入或选择产品…"
+            oninput="qmProdInput(this)" onchange="qmProdChange(this)">
+        </td>
+        <td style="${tdS};width:1%;white-space:nowrap"><input value="${escHtml(item.brand||'')} " data-row="${i}" data-f="brand" style="${inpS};min-width:60px" onchange="qmField(this)"></td>
+        <td style="${tdS};width:1%;white-space:nowrap"><input value="${escHtml(item.model||'')} " data-row="${i}" data-f="model" style="${inpS};min-width:70px" onchange="qmField(this)"></td>
+        <td style="${tdS}"><input value="${escHtml(item.description||'')} " data-row="${i}" data-f="description" style="${inpS};min-width:60px" onchange="qmField(this)"></td>
+        <td style="${tdS};width:52px"><input value="${escHtml(item.unit||'PCS')} " data-row="${i}" data-f="unit" style="${inpS};text-align:center" onchange="qmField(this)"></td>
+        <td style="${tdS};width:60px"><input type="number" min="0" step="any" value="${item.quantity||1}" data-row="${i}" data-f="quantity" style="${numS}" oninput="qmCalc(${i})"></td>
+        <td style="${tdS};width:80px"><input type="number" min="0" step="0.01" value="${item.unit_price||0}" data-row="${i}" data-f="unit_price" style="${numS}" oninput="qmCalc(${i})"></td>
+        <td style="${tdS};width:82px;text-align:right;padding:5px 7px;font-size:12px;color:var(--green);font-family:monospace" id="qm-sub-${i}">${sub}</td>
+        <td style="${tdS};width:28px;text-align:center">
+          <button onclick="qmDel(${i})"
+            style="background:none;border:none;color:var(--red);cursor:pointer;font-size:16px;padding:2px 5px;line-height:1">×</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const total = currentItems.reduce((s,it) => s + (it.unit_price||0)*(it.quantity||1), 0);
+    return `${datalistHtml}
+      <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <table style="width:100%;border-collapse:collapse;min-width:680px">
+          <thead><tr>
+            <th style="${thS};width:30px;white-space:nowrap">#</th>
+            <th style="${thS};white-space:nowrap">产品名称</th>
+            <th style="${thS};white-space:nowrap">品牌</th>
+            <th style="${thS};white-space:nowrap">型号</th>
+            <th style="${thS};min-width:80px">规格/描述</th>
+            <th style="${thS};width:52px;white-space:nowrap">单位</th>
+            <th style="${thS};width:60px;white-space:nowrap">数量</th>
+            <th style="${thS};width:80px;white-space:nowrap">单价(¥)</th>
+            <th style="${thS};width:82px;white-space:nowrap">小计(¥)</th>
+            <th style="${thS};width:28px"></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">
+        <button onclick="qmAdd()"
+          style="padding:5px 14px;border:1px dashed var(--accent);border-radius:6px;
+                 background:transparent;color:var(--accent);cursor:pointer;font-size:12px">
+          ＋ 新增行
+        </button>
+        <div style="font-size:15px;font-weight:700;color:var(--text)">
+          合计：<span id="qm-total" style="color:var(--green);font-family:monospace">¥${total.toFixed(2)}</span>
+        </div>
+      </div>`;
+  };
 
   showModal(`
   <div class="modal modal-lg">
     <div class="modal-header">${q.id ? '编辑报价单' : '新建报价单'}<span class="modal-close" id="modal-close">×</span></div>
     <div class="modal-body">
       <div class="form-row">
-        <div class="form-group"><label>客户</label>
-          <select id="q-customer">
-            <option value="">-- 手动输入 --</option>
-            ${customers.map(c => `<option value="${c.id}|${c.company_name}" ${q.customer_id==c.id?'selected':''}>${c.company_name}</option>`).join('')}
-          </select>
+        <div class="form-group" style="position:relative">
+          <label>客户名称
+            <span id="q-cust-badge" style="margin-left:6px;font-size:11px;color:var(--green);display:${q.customer_id?'inline':'none'}">✓ 已关联</span>
+          </label>
+          <input id="q-cust-input" type="text" autocomplete="off"
+            value="${q.company_name||''}"
+            placeholder="输入关键字搜索客户，或直接输入公司名">
+          <div id="q-cust-dropdown" style="display:none;position:absolute;z-index:999;left:0;right:0;
+            background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+            box-shadow:0 4px 16px rgba(0,0,0,.18);max-height:200px;overflow-y:auto"></div>
         </div>
-        <div class="form-group"><label>公司名称</label><input id="q-company" value="${q.company_name||''}"></div>
+        <div class="form-group"><label>日期</label><input id="q-date" type="date" value="${q.date||new Date().toISOString().split('T')[0]}"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>日期</label><input id="q-date" type="date" value="${q.date||new Date().toISOString().split('T')[0]}"></div>
+        <div class="form-group" style="position:relative">
+          <label>税率情况</label>
+          <div style="display:flex;gap:0">
+            <input id="q-tax" value="${q.tax_info||'增值税专用发票(13%)'}"
+              autocomplete="off" placeholder="选择或输入税率情况"
+              style="flex:1;border-radius:var(--radius) 0 0 var(--radius)">
+            <button type="button" onclick="qTaxToggle()"
+              style="padding:0 10px;border:1px solid var(--border);border-left:none;
+                     border-radius:0 var(--radius) var(--radius) 0;background:var(--bg3);
+                     cursor:pointer;color:var(--text2);font-size:11px">▼</button>
+          </div>
+          <div id="q-tax-dropdown" style="display:none;position:absolute;z-index:999;
+            left:0;right:0;background:var(--bg2);border:1px solid var(--border);
+            border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);margin-top:2px">
+            ${['增值税专用发票(13%)','增值税普通发票(3%)','未税','税前'].map(v =>
+              `<div class="q-tax-opt" data-val="${v}"
+                style="padding:9px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)"
+                onmousedown="qTaxSelect('${v}')"
+                onmouseover="this.style.background='rgba(88,166,255,0.12)'"
+                onmouseout="this.style.background=''">${v}</div>`
+            ).join('')}
+          </div>
+        </div>
         <div class="form-group"><label>状态</label>
           <select id="q-status">
             <option value="draft" ${q.status==='draft'?'selected':''}>草稿</option>
@@ -2912,113 +3043,164 @@ function openQuotationModal(quote) {
         </div>
       </div>
       <div class="form-group"><label>变更记录/备注</label><textarea id="q-log" rows="2">${q.change_log||''}</textarea></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;margin-top:4px">
-        <label style="margin:0;font-size:13px;font-weight:600">报价明细</label>
-        <div style="display:flex;gap:8px">
-          <select id="q-product-sel" style="width:200px">
-            <option value="">从产品库添加…</option>
-            ${(state.data.products||[]).map(p => `<option value="${p.id}">${p.name ? p.name+' · ' : ''}[${p.brand}] ${p.model} - ¥${p.unit_price}</option>`).join('')}
-          </select>
-          <button class="btn btn-sm btn-success" id="btn-add-item">＋ 添加产品</button>
-        </div>
-      </div>
-      <div id="quote-items">${renderItems(items)}</div>
-      <div style="text-align:right;padding-top:10px;border-top:1px solid var(--border);font-size:16px;font-weight:700">
-        合计: <span id="q-total" style="color:var(--green);font-family:'JetBrains Mono',monospace">¥${q.total_amount?.toFixed(2)||'0.00'}</span>
-      </div>
+      <div style="font-size:13px;font-weight:600;margin:8px 0 8px;color:var(--text)">报价明细</div>
+      <div id="qm-table-wrap"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" id="modal-cancel">取消</button>
-      <button class="btn btn-primary" id="modal-save">保存</button>
+      <button class="btn btn-primary" id="modal-save">💾 保存</button>
     </div>
   </div>`);
 
-  let currentItems = [...items];
-
-  const recalc = () => {
-    currentItems.forEach((item, idx) => {
-      const price = parseFloat(document.querySelector(`.qi-price[data-idx="${idx}"]`)?.value) || 0;
-      const qty = parseFloat(document.querySelector(`.qi-qty[data-idx="${idx}"]`)?.value) || 0;
-      const totalEl = document.querySelector(`.qi-total[data-idx="${idx}"]`) || 
-                      document.getElementById('qi-'+idx)?.querySelector('.qi-total');
-      if (totalEl) totalEl.value = (price * qty).toFixed(2);
-      item.name = document.querySelector(`.qi-name[data-idx="${idx}"]`)?.value || '';
-      item.brand = document.querySelector(`.qi-brand[data-idx="${idx}"]`)?.value || '';
-      item.model = document.querySelector(`.qi-model[data-idx="${idx}"]`)?.value || '';
-      item.type = document.querySelector(`.qi-type[data-idx="${idx}"]`)?.value || '';
-      item.description = document.querySelector(`.qi-desc[data-idx="${idx}"]`)?.value || '';
-      item.unit = document.querySelector(`.qi-unit[data-idx="${idx}"]`)?.value || 'PCS';
-      item.unit_price = price;
-      item.quantity = qty;
-      item.total_price = price * qty;
-    });
-    const total = currentItems.reduce((s, i) => s + (i.total_price || 0), 0);
-    const el = document.getElementById('q-total');
-    if (el) el.textContent = '¥' + total.toFixed(2);
+  // ── 挂载辅助函数 ──
+  window.qmDel = (i) => {
+    currentItems.splice(i, 1);
+    document.getElementById('qm-table-wrap').innerHTML = renderTable();
+  };
+  window.qmAdd = () => {
+    currentItems.push({ name:'', brand:'', model:'', description:'', unit:'PCS', unit_price:0, quantity:1 });
+    document.getElementById('qm-table-wrap').innerHTML = renderTable();
+    setTimeout(() => document.querySelector(`input[data-row="${currentItems.length-1}"][data-f="name"]`)?.focus(), 20);
+  };
+  window.qmField = (inp) => {
+    const i = parseInt(inp.dataset.row), f = inp.dataset.f;
+    if (currentItems[i] !== undefined) currentItems[i][f] = inp.value.trim();
+  };
+  window.qmCalc = (i) => {
+    const qty   = parseFloat(document.querySelector(`input[data-row="${i}"][data-f="quantity"]`)?.value)   || 0;
+    const price = parseFloat(document.querySelector(`input[data-row="${i}"][data-f="unit_price"]`)?.value) || 0;
+    if (currentItems[i]) { currentItems[i].quantity = qty; currentItems[i].unit_price = price; }
+    const sub = document.getElementById(`qm-sub-${i}`);
+    if (sub) sub.textContent = (qty * price).toFixed(2);
+    const tot = document.getElementById('qm-total');
+    if (tot) tot.textContent = '¥' + currentItems.reduce((s,it) => s + (it.unit_price||0)*(it.quantity||1), 0).toFixed(2);
+  };
+  window.qmProdInput = (inp) => {
+    const i = parseInt(inp.dataset.row);
+    if (currentItems[i]) currentItems[i].name = inp.value;
+  };
+  window.qmProdChange = (inp) => {
+    const i = parseInt(inp.dataset.row);
+    if (currentItems[i]) currentItems[i].name = inp.value;
+    const opt = document.querySelector(`#qm-prod-list option[value="${CSS.escape(inp.value.trim())}"]`);
+    if (!opt) return;
+    const set = (f, v) => {
+      const el = document.querySelector(`input[data-row="${i}"][data-f="${f}"]`);
+      if (el) { el.value = v; if (currentItems[i]) currentItems[i][f] = f==='unit_price'?parseFloat(v)||0:v; }
+    };
+    set('brand',      opt.dataset.brand || '');
+    set('model',      opt.dataset.model || '');
+    set('unit',       opt.dataset.unit  || 'PCS');
+    set('unit_price', opt.dataset.price || '0');
+    qmCalc(i);
   };
 
-  const rerenderItems = () => {
-    document.getElementById('quote-items').innerHTML = renderItems(currentItems);
-    attachItemEvents();
-  };
+  document.getElementById('qm-table-wrap').innerHTML = renderTable();
 
-  const attachItemEvents = () => {
-    document.querySelectorAll('[data-del-item]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        currentItems.splice(parseInt(btn.dataset.delItem), 1);
-        rerenderItems();
-        recalc();
+  // ── 客户 Autocomplete ──────────────────────────────────────
+  let _qCustId = q.customer_id || null;
+  const qCustInput    = document.getElementById('q-cust-input');
+  const qCustDropdown = document.getElementById('q-cust-dropdown');
+  const qCustBadge    = document.getElementById('q-cust-badge');
+
+  const qRenderDrop = (kw) => {
+    const lkw = kw.toLowerCase();
+    const matched = kw ? customers.filter(x => x.company_name.toLowerCase().includes(lkw)) : customers;
+    if (!matched.length) { qCustDropdown.style.display = 'none'; return; }
+    qCustDropdown.innerHTML = matched.map(x => `
+      <div class="q-cust-opt" data-id="${x.id}" data-name="${x.company_name.replace(/"/g,'&quot;')}"
+        style="padding:9px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)">
+        ${x.company_name}
+      </div>`).join('');
+    qCustDropdown.style.display = '';
+    qCustDropdown.querySelectorAll('.q-cust-opt').forEach(opt => {
+      opt.addEventListener('mousedown', e => {
+        e.preventDefault();
+        _qCustId = parseInt(opt.dataset.id);
+        qCustInput.value = opt.dataset.name;
+        qCustBadge.style.display = 'inline';
+        qCustDropdown.style.display = 'none';
       });
-    });
-    document.querySelectorAll('.qi-price,.qi-qty').forEach(inp => {
-      inp.addEventListener('input', recalc);
+      opt.addEventListener('mouseover', () => opt.style.background = 'rgba(88,166,255,0.12)');
+      opt.addEventListener('mouseout',  () => opt.style.background = '');
     });
   };
 
-  attachItemEvents();
-
-  document.getElementById('btn-add-item')?.addEventListener('click', () => {
-    const sel = document.getElementById('q-product-sel');
-    const pid = sel.value;
-    if (pid) {
-      const p = (state.data.products||[]).find(x => x.id == pid);
-      if (p) currentItems.push({ name: p.name||'', brand: p.brand, model: p.model, type: p.type, description: p.description, unit: p.unit, unit_price: p.unit_price, quantity: 1, total_price: p.unit_price });
-    } else {
-      currentItems.push({ brand: '', model: '', type: '', description: '', unit: 'PCS', unit_price: 0, quantity: 1, total_price: 0 });
-    }
-    rerenderItems();
-    recalc();
+  qCustInput.addEventListener('input',  () => { _qCustId = null; qCustBadge.style.display = 'none'; qRenderDrop(qCustInput.value.trim()); });
+  qCustInput.addEventListener('focus',  () => qRenderDrop(qCustInput.value.trim()));
+  qCustInput.addEventListener('blur',   () => setTimeout(() => { qCustDropdown.style.display = 'none'; }, 150));
+  // ── 税率下拉 ──────────────────────────────────────────────
+  window.qTaxToggle = () => {
+    const dd = document.getElementById('q-tax-dropdown');
+    if (!dd) return;
+    dd.style.display = dd.style.display === 'none' ? '' : 'none';
+  };
+  window.qTaxSelect = (val) => {
+    const inp = document.getElementById('q-tax');
+    if (inp) inp.value = val;
+    const dd = document.getElementById('q-tax-dropdown');
+    if (dd) dd.style.display = 'none';
+  };
+  document.getElementById('q-tax')?.addEventListener('blur', () => {
+    setTimeout(() => {
+      const dd = document.getElementById('q-tax-dropdown');
+      if (dd) dd.style.display = 'none';
+    }, 200);
+  });
+  document.getElementById('q-tax')?.addEventListener('focus', () => {
+    const dd = document.getElementById('q-tax-dropdown');
+    if (dd) dd.style.display = '';
   });
 
-  document.getElementById('q-customer')?.addEventListener('change', e => {
-    const val = e.target.value;
-    if (val) {
-      const [id, name] = val.split('|');
-      document.getElementById('q-company').value = name;
-    }
+  qCustInput.addEventListener('keydown', e => {
+    const opts = qCustDropdown.querySelectorAll('.q-cust-opt');
+    if (!opts.length) return;
+    const active = qCustDropdown.querySelector('.q-cust-opt.kbfocus');
+    let idx = Array.from(opts).indexOf(active);
+    if (e.key === 'ArrowDown') { e.preventDefault(); idx = (idx+1)%opts.length; }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); idx = (idx-1+opts.length)%opts.length; }
+    else if (e.key === 'Enter' && active) {
+      e.preventDefault();
+      _qCustId = parseInt(active.dataset.id);
+      qCustInput.value = active.dataset.name;
+      qCustBadge.style.display = 'inline';
+      qCustDropdown.style.display = 'none';
+      return;
+    } else if (e.key === 'Escape') { qCustDropdown.style.display = 'none'; return; }
+    opts.forEach(o => { o.classList.remove('kbfocus'); o.style.background = ''; });
+    if (opts[idx]) { opts[idx].classList.add('kbfocus'); opts[idx].style.background = 'rgba(88,166,255,0.12)'; }
   });
 
   document.getElementById('modal-close').onclick = closeModal;
   document.getElementById('modal-cancel').onclick = closeModal;
   document.getElementById('modal-save').onclick = async () => {
-    recalc();
-    const custVal = document.getElementById('q-customer').value;
-    const customerID = custVal ? parseInt(custVal.split('|')[0]) : null;
-    const total = currentItems.reduce((s, i) => s + (i.total_price || 0), 0);
+    // 收集最新输入值
+    currentItems.forEach((item, i) => {
+      ['name','brand','model','description','unit'].forEach(f => {
+        const el = document.querySelector(`input[data-row="${i}"][data-f="${f}"]`);
+        if (el) item[f] = el.value.trim();
+      });
+      item.quantity   = parseFloat(document.querySelector(`input[data-row="${i}"][data-f="quantity"]`)?.value)   || 0;
+      item.unit_price = parseFloat(document.querySelector(`input[data-row="${i}"][data-f="unit_price"]`)?.value) || 0;
+      item.total_price = item.unit_price * item.quantity;
+    });
+    const validItems = currentItems.filter(it => it.name || it.unit_price);
+    const total = validItems.reduce((s,it) => s + it.total_price, 0);
     const body = {
-      customer_id: customerID,
-      company_name: document.getElementById('q-company').value.trim(),
-      date: document.getElementById('q-date').value,
-      status: document.getElementById('q-status').value,
-      change_log: document.getElementById('q-log').value,
-      items: JSON.stringify(currentItems),
+      customer_id:  _qCustId || null,
+      company_name: document.getElementById('q-cust-input').value.trim(),
+      date:         document.getElementById('q-date').value,
+      status:       document.getElementById('q-status').value,
+      tax_info:     document.getElementById('q-tax').value.trim(),
+      change_log:   document.getElementById('q-log').value,
+      items:        JSON.stringify(validItems),
       total_amount: total,
     };
     try {
       if (q.id) await api('PUT', '/quotations/' + q.id, body);
-      else await api('POST', '/quotations', body);
+      else      await api('POST', '/quotations', body);
       closeModal();
-    } catch (e) { alert(e.message); }
+    } catch(e) { alert(e.message); }
   };
 }
 
@@ -3032,6 +3214,7 @@ let _contractStatusRow = null;
 async function loadContracts(content, actions) {
   const canEdit = state.user.is_admin || hasPermission('contracts');
   actions.innerHTML = (canEdit ? `<button class="btn btn-primary" id="btn-add-contract">＋ <span class="btn-text">新增合同</span></button>` : '')
+    + `<button class="btn" onclick="ctOpenTemplateManager()">📋 <span class="btn-text">模板管理</span></button>`
     + `<button class="btn" id="btn-export-contracts" onclick="exportContracts()">📤 <span class="btn-text">导出Excel</span></button>`;
   if (canEdit) {
     document.getElementById('btn-add-contract')?.addEventListener('click', async () => {
@@ -3123,6 +3306,7 @@ function renderContractRows(contracts, canEdit, statusRow) {
     <td style="color:var(--text3)">${c.created_at?.split('T')[0]||''}</td>
     <td>
       <button class="btn btn-sm" data-action="view-contract" data-id="${c.id}">查看</button>
+      <button class="btn btn-sm" data-action="export-contract" data-id="${c.id}" style="margin-left:4px">📥 导出</button>
       ${canEdit ? `
       <button class="btn btn-sm" data-action="edit-contract" data-id="${c.id}" style="margin-left:4px">编辑</button>
       <button class="btn btn-sm btn-danger" data-action="del-contract" data-id="${c.id}" style="margin-left:4px">删除</button>` : ''}
@@ -3137,6 +3321,10 @@ function attachContractActions(canEdit, statusRow) {
       const c = await api('GET', '/contracts/' + btn.dataset.id);
       viewContractModal(c);
     });
+  });
+  // 导出合同
+  document.querySelectorAll('[data-action=export-contract]').forEach(btn => {
+    btn.addEventListener('click', () => ctOpenExportModal(btn.dataset.id));
   });
   if (!canEdit) return;
   document.querySelectorAll('[data-action=edit-contract]').forEach(btn => {
@@ -3232,22 +3420,82 @@ function viewContractModal(c) {
             </span>`).join('')}
         </div>
       </div>
+      <!-- 签订日期 / 税率 / 备注 -->
+      ${(c.sign_date||c.remarks) ? `<div class="form-row" style="margin-bottom:12px">
+        ${c.sign_date ? `<div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px;color:var(--text3)">签订日期</label>
+          <div style="font-size:14px">${c.sign_date}</div>
+        </div>` : ''}
+        ${c.remarks ? `<div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px;color:var(--text3)">备注/条款补充</label>
+          <div style="font-size:13px;white-space:pre-wrap;line-height:1.6">${escHtml(c.remarks)}</div>
+        </div>` : ''}
+      </div>` : ''}
       ${c.content ? `<div style="margin-bottom:16px">
         <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:6px">合同内容</label>
         <div style="background:var(--bg3);border-radius:6px;padding:12px;font-size:13px;white-space:pre-wrap;line-height:1.6;max-height:200px;overflow-y:auto">${c.content}</div>
       </div>` : ''}
+      <!-- 报价明细（关联报价单时显示）-->
+      <div id="cv-quote-detail" style="margin-bottom:16px"></div>
       <div>
         <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:8px">合同附件</label>
         ${renderAttachView(c.attachments)}
       </div>
     </div>
     <div class="modal-footer">
+      <button class="btn" onclick="ctOpenExportModal(${c.id})" style="margin-right:auto">📥 导出合同</button>
       <button class="btn" id="modal-close2">关闭</button>
     </div>
   </div>`);
 
   document.getElementById('modal-close').onclick = closeModal;
   document.getElementById('modal-close2').onclick = closeModal;
+
+  // 异步加载关联报价明细
+  if (c.quotation_id) {
+    api('GET', '/quotations/' + c.quotation_id).then(q => {
+      if (!q) return;
+      let items = [];
+      try { items = JSON.parse(q.items || '[]'); } catch(e) {}
+      const thS = 'background:#2E75B6;color:#fff;padding:6px 8px;font-size:11px;font-weight:600;text-align:center;border:1px solid #1F5C9A;white-space:nowrap';
+      const tdS = 'padding:5px 8px;font-size:12px;border:1px solid #D9D9D9;vertical-align:middle;color:#222;background:#fff';
+      const thead = `<tr>
+        <th style="${thS};width:36px">序号</th>
+        <th style="${thS}">产品名称</th><th style="${thS};width:1%;white-space:nowrap">品牌</th>
+        <th style="${thS};width:1%;white-space:nowrap">型号</th><th style="${thS}">规格/描述</th>
+        <th style="${thS};width:40px">单位</th><th style="${thS};width:50px">数量</th>
+        <th style="${thS};width:80px">单价(¥)</th><th style="${thS};width:80px">小计(¥)</th>
+      </tr>`;
+      const tbody = items.map((it,i) => `<tr>
+        <td style="${tdS};text-align:center;background:${i%2?'#F0F5FF':'#fff'};color:#888">${i+1}</td>
+        <td style="${tdS};background:${i%2?'#F0F5FF':'#fff'}">${escHtml(it.name||'')}</td>
+        <td style="${tdS};text-align:center;background:${i%2?'#F0F5FF':'#fff'}">${escHtml(it.brand||'')}</td>
+        <td style="${tdS};background:${i%2?'#F0F5FF':'#fff'}">${escHtml(it.model||'')}</td>
+        <td style="${tdS};background:${i%2?'#F0F5FF':'#fff'}">${escHtml(it.description||'')}</td>
+        <td style="${tdS};text-align:center;background:${i%2?'#F0F5FF':'#fff'}">${escHtml(it.unit||'')}</td>
+        <td style="${tdS};text-align:center;background:${i%2?'#F0F5FF':'#fff'}">${it.quantity??1}</td>
+        <td style="${tdS};text-align:right;font-family:monospace;background:${i%2?'#F0F5FF':'#fff'}">${(it.unit_price||0).toFixed(2)}</td>
+        <td style="${tdS};text-align:right;font-family:monospace;background:${i%2?'#F0F5FF':'#fff'}">${((it.unit_price||0)*(it.quantity??1)).toFixed(2)}</td>
+      </tr>`).join('');
+      const total = items.reduce((s,it)=>s+(it.unit_price||0)*(it.quantity??1),0);
+      const totalRow = `<tr>
+        <td colspan="8" style="padding:8px;font-weight:700;text-align:right;background:#DEEAF1;color:#1F3864;border:2px solid #2E75B6">合计金额（人民币）</td>
+        <td style="padding:8px;font-weight:700;text-align:right;color:#C00000;background:#DEEAF1;border:2px solid #2E75B6;font-family:monospace">${total.toFixed(2)}</td>
+      </tr>`;
+      const el = document.getElementById('cv-quote-detail');
+      if (el) el.innerHTML = `
+        <label style="font-size:11px;color:#888;display:block;margin-bottom:6px">
+          关联报价单：<span style="color:#2E75B6;font-family:monospace">${escHtml(q.quote_number)}</span>
+          ${q.tax_info ? `&nbsp;·&nbsp;税率：<span style="color:#2E75B6">${escHtml(q.tax_info)}</span>` : ''}
+        </label>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;min-width:500px">
+            <thead>${thead}</thead><tbody>${tbody}</tbody>
+            <tfoot>${totalRow}</tfoot>
+          </table>
+        </div>`;
+    }).catch(()=>{});
+  }
 }
 
 function openContractModal(contract, suggestedNum) {
@@ -3330,7 +3578,12 @@ function openContractModal(contract, suggestedNum) {
         <div class="form-group"><label>合同金额 (¥)</label><input id="ct-amount" type="number" step="0.01" value="${c.amount||0}"></div>
         <div class="form-group"><label>已付金额 (¥)</label><input id="ct-paid-amt" type="number" step="0.01" value="${c.paid_amount||0}"></div>
       </div>
-      <div class="form-group"><label>合同内容</label><textarea id="ct-content" rows="5">${c.content||''}</textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>签订日期</label><input id="ct-sign-date" type="date" value="${c.sign_date||new Date().toISOString().slice(0,10)}"></div>
+        <div class="form-group"><label>乙方公司</label><input id="ct-party-b" value="${escHtml(c.party_b||'')}" placeholder="留空则使用系统公司名称"></div>
+      </div>
+      <div class="form-group"><label>备注/条款补充</label><textarea id="ct-remarks" rows="3" placeholder="可填写付款条款、特殊约定等内容，将插入合同模板的 {{remarks}} 位置">${escHtml(c.remarks||'')}</textarea></div>
+      <div class="form-group"><label>合同内容（旧字段）</label><textarea id="ct-content" rows="3">${c.content||''}</textarea></div>
       <div class="form-group">
         <label>合同状态跟踪</label>
         <div class="status-checks">
@@ -3566,7 +3819,10 @@ function openContractModal(contract, suggestedNum) {
       customer_id: _custId || null,
       custom_company_name: _custId ? '' : custInputVal,
       quotation_id: parseInt(document.getElementById('ct-quotation').value) || null,
-      content: document.getElementById('ct-content').value,
+      content:   document.getElementById('ct-content').value,
+      sign_date: document.getElementById('ct-sign-date')?.value || '',
+      party_b:   document.getElementById('ct-party-b')?.value.trim() || '',
+      remarks:   document.getElementById('ct-remarks')?.value.trim() || '',
       amount: parseFloat(document.getElementById('ct-amount').value) || 0,
       paid_amount: parseFloat(document.getElementById('ct-paid-amt').value) || 0,
       status_sent: document.getElementById('ct-sent').checked,
@@ -3879,93 +4135,6 @@ function openEmployeeModal(emp) {
 // ============================================================
 // TEMPLATES
 // ============================================================
-async function loadTemplates(content, actions) {
-  actions.innerHTML = `<button class="btn btn-primary" id="btn-add-tpl">＋ <span class="btn-text">新增模板</span></button>`;
-  document.getElementById('btn-add-tpl')?.addEventListener('click', () => openTemplateModal(null));
-
-  const templates = await api('GET', '/contract-templates');
-
-  content.innerHTML = `
-  <div class="card" style="margin-bottom:16px">
-    <div class="template-hint">
-      <strong>模板变量说明：</strong>
-      使用 <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{company_name}}</code> 
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{contact_name}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{phone}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{address}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{tax_number}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{quote_number}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{total_amount}}</code>
-      <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--accent)">{{date}}</code>
-    </div>
-  </div>
-  <div class="card">
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>模板名称</th><th>创建时间</th><th>操作</th></tr></thead>
-        <tbody id="tpl-tbody">
-          ${templates.length ? templates.map(t => `
-          <tr>
-            <td style="font-weight:500">${t.name}</td>
-            <td style="color:var(--text3)">${t.created_at?.split('T')[0]||''}</td>
-            <td>
-              <button class="btn btn-sm" data-action="edit-tpl" data-id="${t.id}">编辑</button>
-              <button class="btn btn-sm btn-danger" data-action="del-tpl" data-id="${t.id}" style="margin-left:4px">删除</button>
-            </td>
-          </tr>`).join('') : '<tr><td colspan="3"><div class="empty-state">暂无模板</div></td></tr>'}
-        </tbody>
-      </table>
-    </div>
-  </div>`;
-
-  document.querySelectorAll('[data-action=edit-tpl]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const rows = await api('GET', '/contract-templates');
-      const t = rows.find(x => x.id == btn.dataset.id);
-      // Fetch full content
-      const full = await fetch('/api/contract-templates/' + btn.dataset.id, {
-        headers: { Authorization: 'Bearer ' + state.token }
-      }).then(r => r.json()).catch(() => t);
-      openTemplateModal(full || t);
-    });
-  });
-  document.querySelectorAll('[data-action=del-tpl]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('确定删除模板？')) return;
-      await api('DELETE', '/contract-templates/' + btn.dataset.id);
-      loadPage();
-    });
-  });
-}
-
-function openTemplateModal(tpl) {
-  const t = tpl || {};
-  showModal(`
-  <div class="modal modal-lg">
-    <div class="modal-header">${t.id ? '编辑模板' : '新增模板'}<span class="modal-close" id="modal-close">×</span></div>
-    <div class="modal-body">
-      <div class="form-group"><label>模板名称 *</label><input id="tpl-name" value="${t.name||''}"></div>
-      <div class="form-group"><label>模板内容（支持HTML和变量）</label><textarea id="tpl-content" rows="16" style="font-family:'JetBrains Mono',monospace;font-size:12px">${t.content||''}</textarea></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" id="modal-cancel">取消</button>
-      <button class="btn btn-primary" id="modal-save">保存</button>
-    </div>
-  </div>`);
-  document.getElementById('modal-close').onclick = closeModal;
-  document.getElementById('modal-cancel').onclick = closeModal;
-  document.getElementById('modal-save').onclick = async () => {
-    const name = document.getElementById('tpl-name').value.trim();
-    const content = document.getElementById('tpl-content').value;
-    if (!name) return alert('请填写模板名称');
-    try {
-      if (t.id) await api('PUT', '/contract-templates/' + t.id, { name, content });
-      else await api('POST', '/contract-templates', { name, content });
-      closeModal();
-    } catch (e) { alert(e.message); }
-  };
-}
-
 // ============================================================
 // UTILS
 // ============================================================
@@ -6498,7 +6667,7 @@ function dcRenderSidebar(activeId) {
   }
   el.innerHTML = _dcTables.map(t => {
     const isActive = t.id === activeId;
-    return `<div class="dc-table-item" data-tid="${t.id}" onclick="dcSelectTable(${t.id})"
+    return `<div class="dc-table-item" data-tid="${t.id}" onclick="dcSelectTable(${t.id});dcClearFilters();"
       style="padding:8px 14px;cursor:pointer;border-radius:6px;margin:2px 6px;position:relative;
              background:${isActive?'rgba(88,166,255,.15)':''};
              border:${isActive?'1px solid rgba(88,166,255,.35)':'1px solid transparent'};
@@ -6548,6 +6717,8 @@ async function dcLoadContent() {
         <button class="btn btn-primary btn-sm" onclick="dcAddRow()">＋ 新增</button>
         <button class="btn btn-sm" onclick="dcImportExcel()">📥 导入Excel</button>
         <button class="btn btn-sm" onclick="dcExport()">📤 导出</button>
+        <button class="btn btn-sm" onclick="dcOpenTemplateExport()">📋 模板导出</button>
+        <button class="btn btn-sm" onclick="dcOpenTemplateManager()">⚙️ 模板管理</button>
         <button class="btn btn-sm" onclick="dcManageFormats()">📐 导入格式</button>
         <button class="btn btn-sm" onclick="dcShareTable()">🔗 分享</button>
         <button class="btn btn-sm" onclick="dcOpenViewConfig()">👁 列设置</button>
@@ -6555,10 +6726,16 @@ async function dcLoadContent() {
       </div>
     </div>
     <!-- 搜索栏 -->
-    <div class="search-bar" style="flex-shrink:0">
-      <input class="search-input" id="dc-search" placeholder="搜索数据…">
-      <button class="btn" onclick="dcSearch()">搜索</button>
+    <div style="flex-shrink:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <div class="search-bar" style="flex:1;min-width:200px">
+        <input class="search-input" id="dc-search" placeholder="搜索数据…">
+        <button class="btn" onclick="dcSearch()">搜索</button>
+      </div>
+      <button class="btn btn-sm" onclick="dcOpenAdvFilter()" id="dc-adv-filter-btn">🔍 高级筛选</button>
+      <button class="btn btn-sm" onclick="dcClearFilters()" id="dc-clear-filter-btn" style="display:none;color:var(--red);border-color:var(--red)">✕ 清除筛选</button>
     </div>
+    <!-- 激活的筛选条件展示 -->
+    <div id="dc-filter-tags" style="flex-shrink:0;display:flex;gap:6px;flex-wrap:wrap"></div>
     <!-- 数据表格 -->
     <div style="flex:1;overflow:auto;background:var(--bg2);border:1px solid var(--border);border-radius:10px">
       <div id="dc-table-wrap" style="min-width:100%"></div>
@@ -6573,7 +6750,16 @@ async function dcLoadContent() {
 async function dcLoadRows() {
   if (!_dcActiveTable) return;
   const q = document.getElementById('dc-search')?.value || '';
-  const res = await api('GET', `/dc/tables/${_dcActiveTable.id}/rows?q=${encodeURIComponent(q)}&page=${_dcPage}&sort_by=${_dcSortBy}&order=${_dcSortDir}`);
+  const body = {
+    filters: _dcFilters || [],
+    logic: _dcFilterLogic || 'AND',
+    q,
+    sort_by: _dcSortBy,
+    sort_dir: _dcSortDir,
+    page: _dcPage,
+    page_size: 50,
+  };
+  const res = await api('POST', `/dc/tables/${_dcActiveTable.id}/rows/query`, body);
   _dcRows  = res.data  || [];
   _dcTotal = res.total || 0;
 
@@ -6591,6 +6777,12 @@ async function dcLoadRows() {
 }
 
 function dcSearch() { _dcPage = 1; dcLoadRows(); }
+
+// ── 高级筛选状态 ────────────────────────────────────────────────────────────
+if (typeof _dcFilters === 'undefined') {
+  var _dcFilters = [];       // [{field, op, value, value2}]
+  var _dcFilterLogic = 'AND';
+}
 
 // ── 数据表格渲染 ──────────────────────────────────────────────
 // ── 列视图配置（存表结构，所有用户共享）─────────────────────────────────────
@@ -6824,9 +7016,17 @@ function dcRenderTable() {
   const iconBtn = (tip, ico, fn, danger) =>
     `<button title="${tip}" onclick="${fn}" style="background:none;border:none;cursor:pointer;font-size:15px;padding:2px 5px;opacity:.7;border-radius:4px;line-height:1;${danger?'color:var(--red)':''}" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.7'">${ico}</button>`;
 
+  // 筛选图标：有激活筛选的字段显示蓝色
+  const activeFilterFields = new Set((_dcFilters||[]).map(f=>f.field));
+  const filterBtn = fid => {
+    const active = activeFilterFields.has(fid);
+    return `<span onclick="event.stopPropagation();dcOpenColFilter('${fid}')"
+      style="margin-left:3px;cursor:pointer;font-size:10px;opacity:${active?1:.4};color:${active?'var(--accent)':'inherit'}"
+      title="筛选此列">▼</span>`;
+  };
   const thead = `<tr>
-    <th style="${thStyle}" onclick="dcSetSort('id')">#${arrow('id')}</th>
-    ${fields.map(f=>`<th style="${thStyle}" onclick="dcSetSort('${f.id}')">${escHtml(f.name)}${arrow(f.id)}</th>`).join('')}
+    <th style="${thStyle}" onclick="dcSetSort('id')">#${arrow('id')}${filterBtn('id')}</th>
+    ${fields.map(f=>`<th style="${thStyle}" onclick="dcSetSort('${f.id}')">${escHtml(f.name)}${arrow(f.id)}${filterBtn(f.id)}</th>`).join('')}
     <th style="${thAct}">操作</th>
   </tr>`;
 
@@ -7546,7 +7746,43 @@ async function dcSaveShare(tid) {
 // ── 导出 Excel ────────────────────────────────────────────────
 async function dcExport() {
   if (!_dcActiveTable) return;
-  window.location.href = `/api/dc/tables/${_dcActiveTable.id}/export?token=${state.token}`;
+  const tableId = _dcActiveTable.id;
+  const hasFilters = (_dcFilters||[]).length > 0;
+
+  try {
+    const body = {
+      filters: _dcFilters || [],
+      logic: _dcFilterLogic || 'AND',
+      sort_by: _dcSortBy,
+      sort_dir: _dcSortDir,
+    };
+    // POST /export 不带 template_id，后端走默认 xlsx 导出
+    const res = await fetch(`/api/dc/tables/${tableId}/export`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      alert('导出失败：' + (e.error || res.statusText));
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    const filename = m ? decodeURIComponent(m[1]) : `${_dcActiveTable.name}_导出.xlsx`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    if (hasFilters) {
+      const total = _dcTotal || 0;
+      // 简单提示导出的是过滤后数据
+      console.info(`导出过滤后数据，共 ${total} 条`);
+    }
+  } catch(e) { alert('导出失败：' + e.message); }
 }
 
 // ── 导入格式管理 ──────────────────────────────────────────────
@@ -9462,7 +9698,6 @@ async function saLoadFeatures() {
         { id: 'datacenter', icon: '🗄️', label: '数据中心' },
       ]},
       { label: '系统', items: [
-        { id: 'templates',  icon: '📄', label: '合同模板' },
       ]},
     ];
 
@@ -10721,6 +10956,8 @@ const _sf = {
   currentData: null,
   // 多选模式
   multiSelect: false,
+  // 是否在 /web 目录树下（web目录下禁用重命名，因物理文件名不变）
+  isWebDir: false,
 };
 
 // ── CSS 注入（只注入一次）────────────────────────────────────────────────
@@ -10815,7 +11052,8 @@ async function loadShareFiles(content, actions) {
     <div id="sf-wrap" style="height:100%;display:flex;flex-direction:column;overflow:hidden">
       <div class="sf-toolbar" id="sf-toolbar"></div>
       <div class="sf-crumb-bar" id="sf-breadcrumb"></div>
-      <div id="sf-list" style="flex:1;overflow-y:auto;padding-top:2px"></div>
+      <div id="sf-list" style="flex:1;overflow-y:auto;padding-top:2px;position:relative"
+        ondragenter="sfDragEnter(event)" ondragover="sfDragOver(event)" ondragleave="sfDragLeave(event)" ondrop="sfDrop(event)"></div>
     </div>
   `;
   await sfLoadDir(0);
@@ -10835,7 +11073,7 @@ function sfRenderToolbar() {
 
   // 按钮启用逻辑
   const canDownload  = onlyFiles && cnt >= 1;
-  const canRename    = singleFile;
+  const canRename    = singleFile && !_sf.isWebDir;
   const canCopy      = onlyFiles && cnt >= 1;
   const canCut       = onlyFiles && cnt >= 1;
   const canPaste     = hasClip && _sf.canWrite;
@@ -10910,6 +11148,20 @@ async function sfLoadDir(dirID) {
   }
   _sf.canWrite = data.can_write;
   _sf.currentData = data;
+  // 检查面包屑中是否有 name='web' 的顶层目录（即在 /web 树下）
+  _sf.isWebDir = !!(data.breadcrumb || []).some(b => b.name === 'web') ||
+    (data.dirs || []).concat(data.files || []).length === 0 && dirID !== 0 &&
+    false; // 保守：仅靠面包屑判断
+  // 更可靠：通过目录id对应的admin_only标志判断（后端已返回当前目录信息）
+  // 面包屑中第一个条目如果 name=web 则在web树
+  if (dirID === 0) {
+    _sf.isWebDir = false;
+  } else {
+    const crumbs = data.breadcrumb || [];
+    _sf.isWebDir = crumbs.length > 0 && crumbs[0].name === 'web';
+    // 如果面包屑为空（直接进了web根目录），检查 can_write && admin_only
+    if (!_sf.isWebDir && data.admin_only) _sf.isWebDir = true;
+  }
 
   sfRenderBreadcrumb(data.breadcrumb);
   sfRenderToolbar();
@@ -10984,6 +11236,10 @@ function sfRenderList(hl) {
       const canEnter = item.can_read;
       const gray = canEnter ? '' : 'sf-noperm';
       const noPermTip = canEnter ? '' : `<span style="font-size:11px;color:var(--text3)">(无权限)</span>`;
+      const adminOnlyBadge = item.admin_only
+        ? `<span style="font-size:10px;color:var(--accent);margin-left:4px;border:1px solid var(--accent);border-radius:3px;padding:0 3px">仅管理员</span>` : '';
+      const webLinkTip = item.admin_only && item.name === 'web'
+        ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">→ 静态访问: /web/文件名</span>` : '';
       const adminOps = isAdmin ? `
         <button class="btn btn-xs" onclick="event.stopPropagation();sfEditDirModal(${item.id},\`${escHtml(item.name)}\`,${item.max_file_mb})" title="编辑">✏️</button>
         <button class="btn btn-xs" onclick="event.stopPropagation();sfPermModal(${item.id},\`${escHtml(item.name)}\`)" title="权限">🔐</button>` : '';
@@ -10992,8 +11248,8 @@ function sfRenderList(hl) {
           ondblclick="sfDirEnter(${item.id},${!canEnter})">
         ${_sf.multiSelect ? '<td style="padding:6px 4px 6px 10px">' + chk + '</td>' : ''}
         <td><div class="sf-name-cell">
-          <span class="sf-file-icon">📁</span>
-          <span class="nm">${hl(item.name)}</span>${noPermTip}
+          <span class="sf-file-icon">${item.admin_only ? '🔒' : '📁'}</span>
+          <span class="nm">${hl(item.name)}</span>${noPermTip}${adminOnlyBadge}${webLinkTip}
           <span style="margin-left:4px">${adminOps}</span>
         </div></td>
         <td style="text-align:right;color:var(--text3)">—</td>
@@ -11416,6 +11672,191 @@ async function sfDoUpload(input) {
   sfLoadDir(_sf.dirID);
 }
 
+// ── 拖拽上传 ──────────────────────────────────────────────────────────────
+function sfDragEnter(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!_sf.canWrite) return;
+  const el = document.getElementById('sf-list');
+  if (el && !document.getElementById('sf-drop-overlay')) {
+    const ov = document.createElement('div');
+    ov.id = 'sf-drop-overlay';
+    ov.style.cssText = `position:absolute;inset:0;background:rgba(46,117,182,.18);
+      border:2px dashed #2E75B6;border-radius:8px;z-index:100;
+      display:flex;align-items:center;justify-content:center;pointer-events:none`;
+    ov.innerHTML = `<div style="font-size:28px;color:#2E75B6;font-weight:600;text-align:center">
+      📂<br><span style="font-size:14px">松开鼠标上传到当前目录</span>
+    </div>`;
+    el.appendChild(ov);
+  }
+}
+
+function sfDragOver(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = _sf.canWrite ? 'copy' : 'none';
+}
+
+function sfDragLeave(e) {
+  e.stopPropagation();
+  // 只有真正离开 sf-list 才移除遮罩（relatedTarget 不在 sf-list 内）
+  const el = document.getElementById('sf-list');
+  if (el && !el.contains(e.relatedTarget)) {
+    document.getElementById('sf-drop-overlay')?.remove();
+  }
+}
+
+async function sfDrop(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  document.getElementById('sf-drop-overlay')?.remove();
+  if (!_sf.canWrite) {
+    sfToast('当前目录无上传权限', 'error');
+    return;
+  }
+
+  // 用 webkitGetAsEntry 支持目录递归，兼容 fallback 到 files
+  const items = Array.from(e.dataTransfer?.items || []);
+  const entries = items.map(it => it.webkitGetAsEntry?.()).filter(Boolean);
+
+  if (!entries.length) {
+    // 旧浏览器 fallback：只处理文件
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return;
+    await sfUploadFileList(files, _sf.dirID);
+    sfLoadDir(_sf.dirID);
+    return;
+  }
+
+  // 先统计总文件数（显示进度用）
+  const counter = { total: 0, ok: 0, fail: 0 };
+  await sfCountEntries(entries, counter);
+
+  // 显示进度弹窗
+  const prog = sfProgressModal(counter.total);
+  prog._counter = counter;
+  prog._seq = 0;
+
+  // 递归处理所有条目
+  for (const entry of entries) {
+    await sfProcessEntry(entry, _sf.dirID, prog);
+  }
+
+  prog.done(counter.ok, counter.fail);
+  sfLoadDir(_sf.dirID);
+}
+
+// 统计所有文件数量（递归）
+async function sfCountEntries(entries, counter) {
+  for (const entry of entries) {
+    if (entry.isFile) {
+      counter.total++;
+    } else if (entry.isDirectory) {
+      const children = await sfReadAllEntries(entry.createReader());
+      await sfCountEntries(children, counter);
+    }
+  }
+}
+
+// 递归处理一个条目（文件或目录）
+async function sfProcessEntry(entry, parentDirId, prog) {
+  if (entry.isFile) {
+    // 读取文件对象
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    prog._seq++;
+    prog.setFile(entry.fullPath || entry.name, 0, prog._seq);
+    await new Promise(resolve => {
+      const fd = new FormData();
+      fd.append('file', file);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/share/dirs/${parentDirId}/upload`);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+      xhr.upload.onprogress = ev => {
+        if (ev.lengthComputable)
+          prog.setFile(entry.fullPath || entry.name, Math.round(ev.loaded / ev.total * 100), prog._seq);
+      };
+      xhr.onload = () => {
+        prog.setFile(entry.fullPath || entry.name, 100, prog._seq);
+        try {
+          const j = JSON.parse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) prog._counter.ok++;
+          else { prog._counter.fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
+        } catch { prog._counter.fail++; }
+        resolve();
+      };
+      xhr.onerror = () => { prog._counter.fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
+      xhr.send(fd);
+    });
+
+  } else if (entry.isDirectory) {
+    // 在网盘创建对应子目录
+    let newDirId = parentDirId;
+    try {
+      const res = await api('POST', '/share/dirs', {
+        name: entry.name,
+        parent_id: parentDirId,
+        max_file_mb: 100,
+      });
+      newDirId = res.id;
+    } catch(err) {
+      sfToast(`创建目录 ${entry.name} 失败`, 'error');
+      return;
+    }
+    // 读取目录内所有条目（readEntries 每次最多100，需循环）
+    const children = await sfReadAllEntries(entry.createReader());
+    for (const child of children) {
+      await sfProcessEntry(child, newDirId, prog);
+    }
+  }
+}
+
+// 循环调用 reader.readEntries 直到返回空（解决每次最多100条限制）
+function sfReadAllEntries(reader) {
+  return new Promise(resolve => {
+    const all = [];
+    function readBatch() {
+      reader.readEntries(batch => {
+        if (!batch.length) { resolve(all); return; }
+        all.push(...batch);
+        readBatch(); // 继续读下一批
+      }, () => resolve(all)); // 出错时返回已读到的
+    }
+    readBatch();
+  });
+}
+
+// 普通文件列表上传（fallback）
+async function sfUploadFileList(files, dirId) {
+  const prog = sfProgressModal(files.length);
+  let ok = 0, fail = 0;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    prog.setFile(file.name, 0, i + 1);
+    await new Promise(resolve => {
+      const fd = new FormData();
+      fd.append('file', file);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/share/dirs/${dirId}/upload`);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+      xhr.upload.onprogress = ev => {
+        if (ev.lengthComputable) prog.setFile(file.name, Math.round(ev.loaded / ev.total * 100), i + 1);
+      };
+      xhr.onload = () => {
+        prog.setFile(file.name, 100, i + 1);
+        try {
+          const j = JSON.parse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) ok++;
+          else { fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
+        } catch { fail++; }
+        resolve();
+      };
+      xhr.onerror = () => { fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
+      xhr.send(fd);
+    });
+  }
+  prog.done(ok, fail);
+}
+
 // ── Toast ─────────────────────────────────────────────────────────────────
 function sfToast(msg, type) {
   const el = document.createElement('div');
@@ -11701,6 +12142,7 @@ async function loadBookmarks(content, actions) {
     <button class="btn btn-sm" id="bk-view-btn" onclick="bkToggleView()" title="切换显示方式">${_bkView==='cat'?'⊞ 分类':'☰ 列表'}</button>
     <button class="btn btn-sm" id="bk-edit-btn" onclick="bkToggleEdit()">✏️ 编辑</button>
     <button class="btn btn-sm" onclick="bkOpenNotebook()">📝 备忘录</button>
+    ${state.user?.is_admin ? '<button class="btn btn-sm" onclick="bkOpenPage(null)">📄 新建页面</button>' : ''}
     <button class="btn btn-primary btn-sm" onclick="bkOpenEdit(null)">＋ 添加网址</button>`;
 
   content.innerHTML = `
@@ -11726,9 +12168,9 @@ function bkSearchKey(e) {
   if (_bkCategory) list = list.filter(b => b.category === _bkCategory);
   const kw = document.getElementById('bk-search')?.value.toLowerCase() || '';
   if (kw) list = list.filter(b =>
-    b.name.toLowerCase().includes(kw) ||
-    b.url.toLowerCase().includes(kw)  ||
-    b.remark.toLowerCase().includes(kw));
+    (b.name||'').toLowerCase().includes(kw) ||
+    (b.url||'').toLowerCase().includes(kw)  ||
+    (b.remark||'').toLowerCase().includes(kw));
   if (list.length === 1) window.open(list[0].url, '_blank');
 }
 
@@ -11800,9 +12242,9 @@ function bkRender() {
   let list = _bkList;
   // 搜索过滤（两种模式都支持）
   if (_bkSearch) list = list.filter(b =>
-    b.name.toLowerCase().includes(_bkSearch) ||
-    b.url.toLowerCase().includes(_bkSearch)  ||
-    b.remark.toLowerCase().includes(_bkSearch));
+    (b.name||'').toLowerCase().includes(_bkSearch) ||
+    (b.url||'').toLowerCase().includes(_bkSearch)  ||
+    (b.remark||'').toLowerCase().includes(_bkSearch));
 
   // 方式A：还需按分类tab过滤
   if (_bkView === 'list' && _bkCategory) {
@@ -11862,7 +12304,10 @@ function bkRenderByCat(grid, list) {
 // 抽取单个卡片 HTML
 function bkCardHtml(b) {
   const icon    = bkIcon(b);
-  const tooltip = escHtml(b.remark || b.url);
+  // 页面类型：tooltip 只显示备注或名称（url 是 HTML 代码，不应展示）
+  const tooltip = bkIsPage(b)
+    ? escHtml(b.remark || b.name)
+    : escHtml(b.remark || b.url);
   const actShow = _bkEditMode ? 'flex' : 'none';
   return `<div id="bk-card-${b.id}" class="bk-card" draggable="${_bkEditMode}"
     ondragstart="bkDragStart(event,${b.id})"
@@ -11885,7 +12330,7 @@ function bkCardHtml(b) {
                        max-width:90px;margin:0 auto">${escHtml(b.name)}</div>
            ${b.category?`<div style="font-size:10px;color:var(--text3);margin-top:3px">${escHtml(b.category)}</div>`:''}
          </div>`
-      : `<a href="${escHtml(b.url)}" target="_blank" rel="noopener"
+      : `<a href="${bkIsPage(b)?`/pages/user/${b.id}`:escHtml(b.url)}" target="_blank" rel="noopener"
             style="display:block;text-decoration:none;color:inherit"
             onclick="event.stopPropagation()">
            <div style="font-size:32px;margin-bottom:6px;line-height:1">${icon}</div>
@@ -11897,7 +12342,7 @@ function bkCardHtml(b) {
     }
     <div style="position:absolute;top:4px;right:4px;display:${_bkEditMode?'flex':'none'};gap:2px"
          class="bk-actions" id="bk-act-${b.id}">
-      <button onclick="event.stopPropagation();bkOpenEdit(${b.id})"
+      <button onclick="event.stopPropagation();bkEdit(${b.id})"
         style="background:var(--bg3);border:none;border-radius:4px;cursor:pointer;
                font-size:11px;padding:2px 5px;color:var(--text2)">✏️</button>
       <button onclick="event.stopPropagation();bkDelete(${b.id})"
@@ -11912,9 +12357,20 @@ function bkBindCardEvents(container) {
   // 显示/隐藏逻辑已改用 CSS .bk-card:hover .bk-actions-hover，无需 JS 事件绑定
 }
 
+// 判断是否为 HTML 页面（is_page=1，优先字段判断；兼容旧数据用长度规则）
+function bkIsPage(b) {
+  if (b.is_page === 1) return true;
+  // 兼容旧数据（is_page 字段不存在时）
+  return b.url && b.url.length > 255 &&
+    !b.url.startsWith('http://') && !b.url.startsWith('https://');
+}
+
 function bkIcon(b) {
+  // 用户设置的图标最优先（包括页面类型用户自定义的图标）
   if (b.icon && b.icon.trim()) return escHtml(b.icon);
-  // 尝试用 img 加载 favicon，失败时显示默认 emoji
+  // 页面类型默认图标
+  if (bkIsPage(b)) return '📄';
+  // 普通书签：尝试拉取 favicon
   const domain = (() => { try { return new URL(b.url).hostname; } catch(e) { return ''; } })();
   if (!domain) return '🌐';
   const fallback = BK_EMOJIS[Math.abs(b.id * 7) % BK_EMOJIS.length];
@@ -12021,15 +12477,97 @@ function bkOpenEdit(id) {
   setTimeout(() => document.getElementById('bk-f-name')?.focus(), 50);
 }
 
-async function bkSave(id) {
-  const name   = document.getElementById('bk-f-name')?.value.trim();
-  const url    = document.getElementById('bk-f-url')?.value.trim();
-  const cat    = document.getElementById('bk-f-cat')?.value.trim();
-  const icon   = document.getElementById('bk-f-icon')?.value.trim();
-  const remark = document.getElementById('bk-f-remark')?.value.trim();
-  if (!name) { alert('请填写名称'); return; }
-  if (!url)  { alert('请填写网址'); return; }
-  const payload = { name, url, category: cat, icon, remark,
+// ── 新建/编辑页面 ─────────────────────────────────────────────
+async function bkOpenPage(id) {
+  const b = id ? _bkList.find(x => x.id === id) : null;
+  const cats = [...new Set(_bkList.map(x => x.category).filter(Boolean))];
+  const catOpts = cats.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('');
+  const pageUrl = id ? `/pages/user/${id}` : '';
+
+  // 编辑模式：先加载 HTML 内容，再打开弹窗（避免异步回调时 DOM 已被重建）
+  let htmlContent = '';
+  if (id) {
+    try {
+      const res = await api('GET', `/bookmarks/${id}/content`);
+      htmlContent = res.html || '';
+    } catch(e) { /* 静默 */ }
+  }
+
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">${b ? '编辑页面' : '新建页面'}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
+        <div class="form-group" style="margin:0">
+          <label>页面名称 <span style="color:var(--red)">*</span></label>
+          <input id="bkp-name" value="${escHtml(b?.name||'')}" placeholder="如：我的工具页">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label>分类</label>
+          <input id="bkp-cat" value="${escHtml(b?.category||'')}" placeholder="可选" list="bkp-cat-list">
+          <datalist id="bkp-cat-list">${catOpts}</datalist>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start;margin-bottom:10px">
+        <div class="form-group" style="margin:0">
+          <label>图标</label>
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;max-width:180px">
+            <input id="bkp-icon" value="${escHtml(b?.icon||'📄')}" placeholder="📄"
+              style="width:50px;text-align:center;font-size:18px;padding:4px">
+            ${['📄','📊','🛠️','📋','🔧','📝','🎯','💡','🗒️','⚙️'].map(e =>
+              '<span onclick="document.getElementById(\'bkp-icon\').value=\''+e+'\'"' +
+              ' style="font-size:16px;cursor:pointer;padding:2px">'+e+'</span>'
+            ).join('')}
+          </div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label>备注</label>
+          <input id="bkp-remark" value="${escHtml(b?.remark||'')}" placeholder="页面用途说明（可选）">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label style="font-size:12px;color:var(--text3);font-weight:600">HTML 代码</label>
+        <div style="display:flex;gap:6px">
+          ${pageUrl ? `<a href="${pageUrl}" target="_blank" class="btn btn-sm" style="font-size:11px;text-decoration:none">🔗 预览</a>` : ''}
+          <button class="btn btn-sm" style="font-size:11px" onclick="bkpPreview()">👁 本地预览</button>
+        </div>
+      </div>
+      <textarea id="bkp-html" placeholder="粘贴你的 HTML 代码…"
+        style="width:100%;height:280px;padding:10px;font-size:12px;line-height:1.6;
+               background:var(--bg1);border:1px solid var(--border);border-radius:8px;
+               color:var(--text);resize:vertical;font-family:'JetBrains Mono',monospace;
+               box-sizing:border-box">${escHtml(htmlContent)}</textarea>
+      <div id="bkp-preview-frame" style="display:none;margin-top:10px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <iframe id="bkp-iframe" style="width:100%;height:300px;border:none;background:#fff"></iframe>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="bkSavePage(${id||0})">💾 保存</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+  setTimeout(() => document.getElementById('bkp-name')?.focus(), 50);
+}
+
+function bkpPreview() {
+  const html = document.getElementById('bkp-html')?.value || '';
+  const frame = document.getElementById('bkp-preview-frame');
+  const iframe = document.getElementById('bkp-iframe');
+  if (!frame || !iframe) return;
+  frame.style.display = '';
+  iframe.srcdoc = html;
+}
+
+async function bkSavePage(id) {
+  const name   = document.getElementById('bkp-name')?.value.trim();
+  const cat    = document.getElementById('bkp-cat')?.value.trim();
+  const icon   = document.getElementById('bkp-icon')?.value.trim() || '📄';
+  const remark = document.getElementById('bkp-remark')?.value.trim() || '';
+  const html   = document.getElementById('bkp-html')?.value || '';
+  if (!name) { alert('请填写页面名称'); return; }
+  if (!html.trim()) { alert('请填写 HTML 代码'); return; }
+  const payload = { name, url: html, category: cat, icon, remark, is_page: 1,
                     sort_order: id ? (_bkList.find(b=>b.id===id)?.sort_order||0) : _bkList.length };
   try {
     if (id) {
@@ -12040,6 +12578,44 @@ async function bkSave(id) {
     closeModal();
     await bkReload();
   } catch(e) { alert('保存失败：' + e.message); }
+}
+
+async function bkSave(id) {
+  const name   = document.getElementById('bk-f-name')?.value.trim();
+  const url    = document.getElementById('bk-f-url')?.value.trim();
+  const cat    = document.getElementById('bk-f-cat')?.value.trim();
+  const icon   = document.getElementById('bk-f-icon')?.value.trim();
+  const remark = document.getElementById('bk-f-remark')?.value.trim();
+  if (!name) { alert('请填写名称'); return; }
+  if (!url)  { alert('请填写网址'); return; }
+  // url 不以 http 开头且不是 HTML 内容，自动补 https://
+  let finalUrl = url;
+  if (url.length <= 255 && !url.startsWith('http://') && !url.startsWith('https://')) {
+    finalUrl = 'https://' + url;
+  }
+  const payload = { name, url: finalUrl, category: cat, icon, remark, is_page: 0,
+                    sort_order: id ? (_bkList.find(b=>b.id===id)?.sort_order||0) : _bkList.length };
+  try {
+    if (id) {
+      await api('PUT', `/bookmarks/${id}`, payload);
+    } else {
+      await api('POST', '/bookmarks', payload);
+    }
+    closeModal();
+    await bkReload();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+
+// 编辑入口：根据类型分流到书签编辑或页面编辑
+function bkEdit(id) {
+  const b = _bkList.find(x => x.id === id);
+  if (!b) return;
+  if (bkIsPage(b)) {
+    if (!state.user?.is_admin) { alert('只有管理员可以编辑自定义页面'); return; }
+    bkOpenPage(id);
+  } else {
+    bkOpenEdit(id);
+  }
 }
 
 async function bkDelete(id) {
@@ -12109,6 +12685,1513 @@ function nbClose() {
   if (_nbSaveTimer) { clearTimeout(_nbSaveTimer); _nbSaveTimer = null; }
   nbSave().finally(() => closeModal());
 }
+
+// ============================================================
+// 报价单 Excel 模板管理 & 导出
+// ============================================================
+
+// ── 导出弹窗 ──────────────────────────────────────────────────
+// 记住上次选中的模板（localStorage持久化，刷新后依然有效）
+function qtGetLastTpl() { try { return localStorage.getItem('qt_last_tpl') || '0'; } catch(e) { return '0'; } }
+function qtSetLastTpl(id) { try { localStorage.setItem('qt_last_tpl', id); } catch(e) {} }
+
+async function qtOpenExportModal(quoteId) {
+  const res = await api('GET', '/quote-templates').catch(() => ({ templates: [] }));
+  const templates = res.templates || [];
+
+  const tplList = templates.length
+    ? templates.map(t => `
+        <div class="qt-tpl-item" data-val="${t.id}"
+          style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+                 border:2px solid ${qtGetLastTpl()===String(t.id)?'var(--accent)':'var(--border)'};
+                 border-radius:8px;margin-bottom:6px;cursor:pointer;background:var(--bg2)"
+          onclick="qtSelectTpl(this,'${t.id}')">
+          <input type="radio" name="qt-tpl" value="${t.id}" ${qtGetLastTpl()===String(t.id)?'checked':''} style="margin-top:2px;flex-shrink:0;pointer-events:none">
+          <div>
+            <div style="font-size:13px;font-weight:500;color:${qtGetLastTpl()===String(t.id)?'var(--accent)':'var(--text)'}">${escHtml(t.name)}</div>
+            ${t.description ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(t.description)}</div>` : ''}
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${t.is_public ? '📢 公共模板' : '🔒 私有模板'}</div>
+          </div>
+        </div>`).join('')
+    : '<div style="padding:20px;text-align:center;color:var(--text3);font-size:13px">暂无自定义模板</div>';
+
+  const lastTpl = qtGetLastTpl();
+
+  showModal(`
+  <div class="modal">
+    <div class="modal-header">📥 导出报价单<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">
+        选择导出模板，不选则使用内置默认模板
+      </div>
+      <div class="qt-tpl-item" data-val="0"
+        style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+               border:2px solid ${lastTpl==='0'?'var(--accent)':'var(--border)'};
+               border-radius:8px;margin-bottom:8px;cursor:pointer;background:var(--bg2)"
+        onclick="qtSelectTpl(this,'0')">
+        <input type="radio" name="qt-tpl" value="0" ${lastTpl==='0'?'checked':''} style="flex-shrink:0;pointer-events:none">
+        <div>
+          <div style="font-size:13px;font-weight:500;color:${lastTpl==='0'?'var(--accent)':'var(--text)'}">📄 内置默认模板</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">蓝色表头，含合计行，专业样式</div>
+        </div>
+      </div>
+      ${tplList}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="qtDoExport(${quoteId})">📥 导出</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+}
+
+// 选中模板项：更新所有 item 的边框和标题颜色，勾选对应 radio
+function qtSelectTpl(el, val) {
+  // 重置所有项
+  document.querySelectorAll('.qt-tpl-item').forEach(item => {
+    item.style.borderColor = 'var(--border)';
+    item.style.borderWidth = '2px';
+    const radio = item.querySelector('input[type=radio]');
+    if (radio) radio.checked = false;
+    const title = item.querySelector('div > div:first-child');
+    if (title) title.style.color = 'var(--text)';
+  });
+  // 选中当前项
+  el.style.borderColor = 'var(--accent)';
+  const radio = el.querySelector('input[type=radio]');
+  if (radio) radio.checked = true;
+  const title = el.querySelector('div > div:first-child');
+  if (title) title.style.color = 'var(--accent)';
+}
+
+async function qtDoExport(quoteId) {
+  const radio = document.querySelector('input[name="qt-tpl"]:checked');
+  const templateId = radio ? radio.value : '0';
+  qtSetLastTpl(templateId); // 记住本次选择（localStorage）
+  const url = `/api/quotations/${quoteId}/export` + (templateId !== '0' ? `?template_id=${templateId}` : '');
+  closeModal();
+  // 触发下载
+  const a = document.createElement('a');
+  a.href = url;
+  a.style.display = 'none';
+  // 带认证头需要用 fetch
+  try {
+    const res = await fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + state.token }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('导出失败：' + (err.error || res.statusText));
+      return;
+    }
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    a.href = objUrl;
+    const cd = res.headers.get('Content-Disposition') || '';
+    const matchStar = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    const matchPlain = cd.match(/filename="([^"]+)"/);
+    a.download = matchStar
+      ? decodeURIComponent(matchStar[1])
+      : matchPlain
+        ? matchPlain[1]
+        : `报价单_${quoteId}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(objUrl); a.remove(); }, 1000);
+  } catch(e) {
+    alert('导出失败：' + e.message);
+  }
+}
+
+// ── 模板管理弹窗 ──────────────────────────────────────────────
+async function qtOpenTemplateManager() {
+  const res = await api('GET', '/quote-templates').catch(() => ({ templates: [] }));
+  const templates = res.templates || [];
+  const isAdmin = state.user?.is_admin;
+
+  const renderList = (tpls) => {
+    if (!tpls.length) return '<div style="padding:20px;text-align:center;color:var(--text3)">暂无模板，点击上传添加</div>';
+    return tpls.map(t => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+                  border:1px solid var(--border);border-radius:8px;margin-bottom:6px;
+                  background:var(--bg2)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500;color:var(--text)">${escHtml(t.name)}</div>
+          ${t.description ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(t.description)}</div>` : ''}
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${t.is_public ? '📢 公共' : '🔒 私有'} · ${t.created_at?.slice(0,10)||''}</div>
+        </div>
+        <button onclick="qtDownloadTemplate(${t.id},'${escHtml(t.name)}')"
+          style="background:none;border:1px solid var(--border);border-radius:6px;
+                 padding:4px 8px;cursor:pointer;font-size:12px;color:var(--text2);
+                 flex-shrink:0">⬇️ 下载</button>
+        <button onclick="qtDeleteTemplate(${t.id})"
+          style="background:none;border:1px solid var(--red);border-radius:6px;
+                 padding:4px 8px;cursor:pointer;font-size:12px;color:var(--red);
+                 flex-shrink:0">删除</button>
+      </div>`).join('');
+  };
+
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">📋 模板管理<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <!-- 可用字段说明 -->
+      <details style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text3)">
+          📖 模板字段说明（点击展开）
+        </summary>
+        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px">
+          <div>
+            <div style="font-weight:600;color:var(--text2);margin-bottom:6px">头部字段（单值替换）</div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;color:var(--text3)">
+              <code style="color:var(--accent)">{{quote_number}}</code><span>报价单号</span>
+              <code style="color:var(--accent)">{{date}}</code><span>报价日期</span>
+              <code style="color:var(--accent)">{{company_name}}</code><span>客户名称</span>
+              <code style="color:var(--accent)">{{total_amount}}</code><span>合计金额</span>
+              <code style="color:var(--accent)">{{remarks}}</code><span>备注</span>
+              <code style="color:var(--accent)">{{created_by}}</code><span>制单人</span>
+              <code style="color:var(--accent)">{{tax_info}}</code><span>税率情况</span>
+              <code style="color:var(--accent)">{{export_date}}</code><span>导出日期</span>
+            </div>
+          </div>
+          <div>
+            <div style="font-weight:600;color:var(--text2);margin-bottom:6px">明细行字段（放在 {{#ROW}}…{{/ROW}} 之间）</div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;color:var(--text3)">
+              <code style="color:var(--green)">{{seq}}</code><span>序号</span>
+              <code style="color:var(--green)">{{name}}</code><span>产品名称</span>
+              <code style="color:var(--green)">{{brand}}</code><span>品牌</span>
+              <code style="color:var(--green)">{{model}}</code><span>型号</span>
+              <code style="color:var(--green)">{{unit_price}}</code><span>单价</span>
+              <code style="color:var(--green)">{{quantity}}</code><span>数量</span>
+              <code style="color:var(--green)">{{subtotal}}</code><span>小计</span>
+              <code style="color:var(--green)">{{unit}}</code><span>单位</span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;padding:8px;background:var(--bg3);border-radius:6px;
+                    font-size:11px;color:var(--text3)">
+          💡 在模板 Excel 中，用一行写 <code>{{#ROW}}</code>，下一行写字段标记，再一行写 <code>{{/ROW}}</code>，导出时会按明细数量自动展开并保留格式
+        </div>
+        <div style="margin-top:10px;text-align:right">
+          <button class="btn btn-sm" onclick="qtDownloadDefaultTemplate()"
+            style="font-size:12px">⬇️ 下载内置默认模板（参考用）</button>
+        </div>
+      </details>
+
+      <!-- 上传区域 -->
+      <div style="border:1px dashed var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
+        <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px">
+          ＋ 上传新模板 ${isAdmin ? '<span style="font-size:11px;color:var(--text3)">（管理员上传为公共模板）</span>' : '<span style="font-size:11px;color:var(--text3)">（普通用户上传为私有模板）</span>'}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label style="font-size:12px;color:var(--text3)">模板名称 *</label>
+            <input id="qt-new-name" placeholder="如：标准报价单" style="width:100%;margin-top:4px"></div>
+          <div><label style="font-size:12px;color:var(--text3)">说明</label>
+            <input id="qt-new-desc" placeholder="可选说明" style="width:100%;margin-top:4px"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="file" id="qt-new-file" accept=".xlsx"
+            style="flex:1;font-size:12px;color:var(--text2)">
+          <button class="btn btn-primary btn-sm" onclick="qtUploadTemplate()">上传</button>
+        </div>
+      </div>
+
+      <!-- 模板列表 -->
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">
+        已有模板（${templates.length} 个）
+      </div>
+      <div id="qt-tpl-list">${renderList(templates)}</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">关闭</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+}
+
+async function qtUploadTemplate() {
+  const name = document.getElementById('qt-new-name')?.value.trim();
+  const desc = document.getElementById('qt-new-desc')?.value.trim() || '';
+  const fileInput = document.getElementById('qt-new-file');
+  const file = fileInput?.files?.[0];
+  if (!name) { alert('请填写模板名称'); return; }
+  if (!file) { alert('请选择 .xlsx 文件'); return; }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('description', desc);
+  fd.append('file', file);
+
+  try {
+    const res = await fetch('/api/quote-templates', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd,
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('上传失败：' + (data.error || res.statusText)); return; }
+    closeModal();
+    qtOpenTemplateManager(); // 重新打开刷新列表
+  } catch(e) { alert('上传失败：' + e.message); }
+}
+
+async function qtDeleteTemplate(id) {
+  if (!confirm('确认删除此模板？')) return;
+  await api('DELETE', `/quote-templates/${id}`);
+  closeModal();
+  qtOpenTemplateManager();
+}
+
+function qtDownloadTemplate(id, name) {
+  const a = document.createElement('a');
+  a.href = `/api/quote-templates/${id}/download`;
+  a.download = name + '.xlsx';
+  // 带认证
+  fetch(a.href, { headers: { 'Authorization': 'Bearer ' + state.token } })
+    .then(r => r.blob())
+    .then(blob => {
+      a.href = URL.createObjectURL(blob);
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    });
+}
+
+// ── 复制报价单 ───────────────────────────────────────────────
+async function qtCopyQuote(quoteId) {
+  // 拉取原报价单完整数据
+  const q = await api('GET', '/quotations/' + quoteId);
+  if (!q) return;
+
+  // 生成新单号：Q + 当天日期 + 4位随机数
+  const today = new Date();
+  const dateStr = today.getFullYear().toString()
+    + String(today.getMonth()+1).padStart(2,'0')
+    + String(today.getDate()).padStart(2,'0');
+  const newNum = 'Q' + dateStr + String(Math.floor(Math.random()*9000)+1000);
+  const newDate = today.toISOString().slice(0,10);
+
+  // 预填数据，日期改今天，单号改新的，状态改草稿
+  const copy = {
+    ...q,
+    id: undefined,
+    quote_number: newNum,
+    date: newDate,
+    status: 'draft',
+    tax_info: q.tax_info || '',
+  };
+
+  await preloadData();
+  openQuotationModal(copy);
+}
+
+// ── 下载内置默认模板 ────────────────────────────────────────
+async function qtDownloadDefaultTemplate() {
+  try {
+    const res = await fetch('/api/quote-templates/default-download', {
+      headers: { 'Authorization': 'Bearer ' + state.token }
+    });
+    if (!res.ok) { alert('下载失败'); return; }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = '报价单模板_示例.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } catch(e) { alert('下载失败：' + e.message); }
+}
+
+// ── 报价单预览弹窗 ───────────────────────────────────────────
+// ── 报价单预览/编辑弹窗 ─────────────────────────────────────
+// 状态：_qtPreviewQuoteId, _qtPreviewItems, _qtPreviewEditMode
+let _qtPreviewQuoteId = null;
+let _qtPreviewQuote   = null;
+let _qtPreviewItems   = [];
+let _qtPreviewProducts = []; // 产品列表缓存（用于下拉匹配）
+
+async function qtPreviewQuote(quoteId) {
+  const q = await api('GET', '/quotations/' + quoteId);
+  if (!q) return;
+
+  _qtPreviewQuoteId = quoteId;
+  _qtPreviewQuote   = q;
+  try { _qtPreviewItems = JSON.parse(q.items || '[]'); } catch(e) { _qtPreviewItems = []; }
+
+  // 预加载产品列表（用于内联编辑时下拉匹配）
+  if (!_qtPreviewProducts.length) {
+    try { const r = await api('GET', '/products'); _qtPreviewProducts = r || []; } catch(e) {}
+  }
+
+  // 创建独立 overlay
+  const ov = document.createElement('div');
+  ov.id = 'qt-preview-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;' +
+    'display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(4px)';
+  ov.innerHTML = `
+  <div style="background:#fff;color:#222;border-radius:12px;width:min(960px,95vw);
+              max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.3);
+              display:flex;flex-direction:column" id="qt-preview-card">
+    <div style="padding:14px 20px;border-bottom:2px solid #2E75B6;display:flex;
+                align-items:center;justify-content:space-between;flex-shrink:0;background:#fff;
+                border-radius:12px 12px 0 0">
+      <span style="font-size:15px;font-weight:600;color:#1F3864">📋 报价清单</span>
+      <button onclick="document.getElementById('qt-preview-overlay')?.remove()"
+        style="background:none;border:none;font-size:20px;cursor:pointer;color:#666;line-height:1;padding:0 4px">×</button>
+    </div>
+    <div style="padding:20px;background:#fff;flex:1" id="qt-preview-body"></div>
+    <div style="padding:12px 20px;border-top:1px solid #E0E0E0;display:flex;justify-content:space-between;
+                align-items:center;flex-shrink:0;background:#F8F9FA;border-radius:0 0 12px 12px"
+         id="qt-preview-footer"></div>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+
+  qtRenderPreview(false); // 初始查看模式
+}
+
+// 渲染预览/编辑内容
+function qtRenderPreview(editMode) {
+  const q = _qtPreviewQuote;
+  const items = _qtPreviewItems;
+  const canEdit = state.user?.is_admin || hasPermission('quotations');
+
+  const statusMap = { draft:'草稿', sent:'已发送', confirmed:'已确认', cancelled:'已取消', negotiating:'议价中', accepted:'已接受', rejected:'已拒绝' };
+  const statusColor = { draft:'#888', sent:'#2E75B6', confirmed:'#217346', cancelled:'#C00000', negotiating:'#D07000', accepted:'#217346', rejected:'#C00000' };
+
+  // ── 表头 ──
+  const thStyle = 'background:#2E75B6;color:#fff;padding:7px 8px;font-size:12px;font-weight:600;text-align:center;border:1px solid #1F5C9A;white-space:nowrap';
+  const tdBase  = 'padding:5px 7px;font-size:12px;border:1px solid #D9D9D9;vertical-align:middle;color:#222;background:#fff';
+
+  const thNowrap = thStyle + ';white-space:nowrap';  // 不换行列
+  // width:1% + white-space:nowrap = 列宽由内容撑开，不换行
+  const thAuto = thStyle + ';width:1%;white-space:nowrap';
+  const thead = `<tr>
+    <th style="${thStyle};width:36px;white-space:nowrap">序号</th>
+    <th style="${thAuto}">产品名称</th>
+    <th style="${thAuto}">品牌</th>
+    <th style="${thAuto}">型号</th>
+    <th style="${thStyle}">规格/描述</th>
+    <th style="${thStyle};width:46px;white-space:nowrap">单位</th>
+    <th style="${thStyle};width:54px;white-space:nowrap">数量</th>
+    <th style="${thStyle};width:80px;white-space:nowrap">单价(¥)</th>
+    <th style="${thStyle};width:80px;white-space:nowrap">小计(¥)</th>
+    ${editMode ? `<th style="${thStyle};width:32px"></th>` : ''}
+  </tr>`;
+
+  // ── 产品 datalist ──
+  const datalist = editMode ? `<datalist id="qt-prod-list">
+    ${_qtPreviewProducts.map(p =>
+      `<option value="${escHtml(p.name||'')}" data-brand="${escHtml(p.brand||'')}" data-model="${escHtml(p.model||p.type||'')}" data-price="${p.unit_price||0}" data-unit="${escHtml(p.unit||'')}">`)
+    .join('')}
+  </datalist>` : '';
+
+  const inpStyle = 'width:100%;padding:3px 5px;font-size:12px;border:1px solid #C0C0C0;border-radius:4px;color:#222;background:#fff;box-sizing:border-box';
+  const numInpStyle = inpStyle + ';text-align:right';
+
+  // ── 明细行 ──
+  const tbody = items.map((item, i) => {
+    const subtotal = ((item.unit_price||0) * (item.quantity??1)).toFixed(2);
+    if (!editMode) {
+      return `<tr style="background:${i%2===1?'#F0F5FF':'#fff'}">
+        <td style="${tdBase};text-align:center;white-space:nowrap;width:36px">${i+1}</td>
+        <td style="${tdBase};white-space:nowrap;width:1%">${escHtml(item.name||'')}</td>
+        <td style="${tdBase};text-align:center;white-space:nowrap;width:1%">${escHtml(item.brand||'')}</td>
+        <td style="${tdBase};white-space:nowrap;width:1%">${escHtml(item.model||'')}</td>
+        <td style="${tdBase};word-break:break-word;min-width:80px">${escHtml(item.description||'')}</td>
+        <td style="${tdBase};text-align:center;white-space:nowrap">${escHtml(item.unit||'')}</td>
+        <td style="${tdBase};text-align:center;white-space:nowrap">${item.quantity??1}</td>
+        <td style="${tdBase};text-align:right;font-family:monospace;white-space:nowrap">${(item.unit_price||0).toFixed(2)}</td>
+        <td style="${tdBase};text-align:right;font-family:monospace;white-space:nowrap">${subtotal}</td>
+      </tr>`;
+    } else {
+      return `<tr id="qt-row-${i}">
+        <td style="${tdBase};text-align:center;color:#888">${i+1}</td>
+        <td style="${tdBase};padding:3px">
+          <input list="qt-prod-list" value="${escHtml(item.name||'')}" data-row="${i}" data-field="name"
+            onchange="qtRowProdChange(this)" oninput="qtRowProdChange(this)"
+            style="${inpStyle}" placeholder="产品名称或搜索…">
+        </td>
+        <td style="${tdBase};padding:3px;white-space:nowrap;width:1%">
+          <input value="${escHtml(item.brand||'')}" data-row="${i}" data-field="brand"
+            onchange="qtRowChange(this)" style="${inpStyle};min-width:70px">
+        </td>
+        <td style="${tdBase};padding:3px;white-space:nowrap;width:1%">
+          <input value="${escHtml(item.model||'')}" data-row="${i}" data-field="model"
+            onchange="qtRowChange(this)" style="${inpStyle};min-width:80px">
+        </td>
+        <td style="${tdBase};padding:3px">
+          <input value="${escHtml(item.description||'')}" data-row="${i}" data-field="description"
+            onchange="qtRowChange(this)" style="${inpStyle}">
+        </td>
+        <td style="${tdBase};padding:3px">
+          <input value="${escHtml(item.unit||'PCS')}" data-row="${i}" data-field="unit"
+            onchange="qtRowChange(this)" style="${inpStyle};text-align:center">
+        </td>
+        <td style="${tdBase};padding:3px">
+          <input type="number" min="0" step="any" value="${item.quantity??1}" data-row="${i}" data-field="quantity"
+            oninput="qtRowCalc(${i})" style="${numInpStyle}">
+        </td>
+        <td style="${tdBase};padding:3px">
+          <input type="number" min="0" step="0.01" value="${item.unit_price||0}" data-row="${i}" data-field="unit_price"
+            oninput="qtRowCalc(${i})" style="${numInpStyle}">
+        </td>
+        <td style="${tdBase};text-align:right;font-family:monospace;color:#217346;font-weight:500" id="qt-subtotal-${i}">${subtotal}</td>
+        <td style="${tdBase};text-align:center;padding:2px">
+          <button onclick="qtRowDelete(${i})"
+            style="background:none;border:none;color:#C00000;cursor:pointer;font-size:15px;padding:0 4px"
+            title="删除此行">×</button>
+        </td>
+      </tr>`;
+    }
+  }).join('');
+
+  // ── 合计 ──
+  const total = items.reduce((s,it) => s + (it.unit_price||0)*(it.quantity??1), 0);
+  const totalRow = `<tr>
+    <td colspan="${editMode?9:8}" style="padding:9px 10px;font-size:13px;font-weight:700;
+                   text-align:right;background:#DEEAF1;color:#1F3864;border:2px solid #2E75B6">
+      合计金额（人民币）</td>
+    <td id="qt-total-cell" style="padding:9px 10px;font-size:14px;font-weight:700;text-align:right;
+               color:#C00000;background:#DEEAF1;border:2px solid #2E75B6;font-family:monospace">
+      ${total.toFixed(2)}</td>
+  </tr>`;
+
+  // ── 头部信息区 ──
+  const headerHtml = `
+  <div style="text-align:center;margin-bottom:16px">
+    <div style="font-size:22px;font-weight:700;color:#1F3864;letter-spacing:6px">报  价  单</div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;
+              border:1px solid #D9D9D9;border-radius:6px;padding:10px 14px;font-size:12px">
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="color:#595959;font-weight:600;white-space:nowrap">报价单号：</span>
+      <span style="color:#2E75B6;font-family:monospace;font-weight:600">${escHtml(q.quote_number)}</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="color:#595959;font-weight:600;white-space:nowrap">日期：</span>
+      ${editMode
+        ? `<input type="date" id="qt-edit-date" value="${escHtml(q.date||'')}"
+             style="border:1px solid #C0C0C0;border-radius:4px;padding:2px 6px;font-size:12px;color:#222">`
+        : `<span style="color:#222">${escHtml(q.date||'')}</span>`}
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="color:#595959;font-weight:600;white-space:nowrap">客户名称：</span>
+      <span style="color:#222;font-weight:500">${escHtml(q.company_name||'')}</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="color:#595959;font-weight:600;white-space:nowrap">税率：</span>
+      ${editMode
+        ? `<input list="qt-tax-list" id="qt-edit-tax" value="${escHtml(q.tax_info||'')}"
+             style="border:1px solid #C0C0C0;border-radius:4px;padding:2px 6px;font-size:12px;color:#222;width:180px">
+           <datalist id="qt-tax-list">
+             <option value="增值税专用发票(13%)"><option value="增值税普通发票(3%)">
+             <option value="未税"><option value="税前">
+           </datalist>`
+        : `<span style="color:#222">${escHtml(q.tax_info||'-')}</span>`}
+    </div>
+  </div>`;
+
+  // ── 新增行按钮（编辑模式）──
+  const addRowBtn = editMode ? `
+  <button onclick="qtRowAdd()"
+    style="margin-top:8px;padding:5px 14px;border:1px dashed #2E75B6;border-radius:6px;
+           background:#F0F6FF;color:#2E75B6;cursor:pointer;font-size:12px;width:100%">
+    ＋ 新增行
+  </button>` : '';
+
+  const remarkHtml = q.change_log ? `
+  <div style="margin-top:12px;padding:8px 12px;background:#F5F5F5;border-radius:6px;
+              font-size:12px;color:#595959;border:1px solid #E0E0E0">
+    <span style="font-weight:600;color:#333">备注：</span>${escHtml(q.change_log)}
+  </div>` : '';
+
+  // 写入 body
+  document.getElementById('qt-preview-body').innerHTML = `
+    ${datalist}
+    ${headerHtml}
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;min-width:600px;background:#fff">
+        <thead>${thead}</thead>
+        <tbody id="qt-tbody">${tbody}</tbody>
+        <tfoot>${totalRow}</tfoot>
+      </table>
+    </div>
+    ${addRowBtn}
+    ${remarkHtml}`;
+
+  // 写入 footer
+  const canEditBtn = canEdit
+    ? (editMode
+        ? `<button onclick="qtPreviewSave()"
+             style="padding:7px 16px;border:none;border-radius:7px;background:#217346;
+                    color:#fff;cursor:pointer;font-size:13px;font-weight:500">💾 保存</button>
+           <button onclick="qtRenderPreview(false)"
+             style="padding:7px 16px;border:1px solid #D0D0D0;border-radius:7px;background:#fff;
+                    color:#333;cursor:pointer;font-size:13px">取消</button>`
+        : `<button onclick="qtRenderPreview(true)"
+             style="padding:7px 16px;border:1px solid #2E75B6;border-radius:7px;background:#fff;
+                    color:#2E75B6;cursor:pointer;font-size:13px">✏️ 编辑明细</button>`)
+    : '';
+
+  document.getElementById('qt-preview-footer').innerHTML = `
+    <div>${canEditBtn}</div>
+    <div style="display:flex;gap:8px">
+      <button onclick="document.getElementById('qt-preview-overlay')?.remove()"
+        style="padding:7px 16px;border:1px solid #D0D0D0;border-radius:7px;background:#fff;
+               color:#333;cursor:pointer;font-size:13px">关闭</button>
+      <button onclick="document.getElementById('qt-preview-overlay')?.remove();qtOpenExportModal(${_qtPreviewQuoteId})"
+        style="padding:7px 16px;border:none;border-radius:7px;background:#2E75B6;
+               color:#fff;cursor:pointer;font-size:13px;font-weight:500">📥 导出</button>
+    </div>`;
+}
+
+// ── 产品下拉选中：自动填充同行字段 ──
+function qtRowProdChange(input) {
+  const row = parseInt(input.dataset.row);
+  const val = input.value;
+  _qtPreviewItems[row].name = val;
+  // 从 datalist 找匹配项
+  const opt = document.querySelector(`#qt-prod-list option[value="${CSS.escape(val)}"]`);
+  if (opt) {
+    const brand = opt.dataset.brand || '';
+    const model = opt.dataset.model || '';
+    const price = parseFloat(opt.dataset.price) || 0;
+    const unit  = opt.dataset.unit  || '';
+    // 回填到同行输入框
+    const r = row;
+    const setField = (field, val) => {
+      const el = document.querySelector(`input[data-row="${r}"][data-field="${field}"]`);
+      if (el) { el.value = val; _qtPreviewItems[r][field] = val; }
+    };
+    setField('brand', brand);
+    setField('model', model);
+    setField('unit',  unit);
+    const priceEl = document.querySelector(`input[data-row="${r}"][data-field="unit_price"]`);
+    if (priceEl) { priceEl.value = price; _qtPreviewItems[r].unit_price = price; }
+    qtRowCalc(r);
+  }
+}
+
+// ── 普通字段变更 ──
+function qtRowChange(input) {
+  const row = parseInt(input.dataset.row);
+  const field = input.dataset.field;
+  _qtPreviewItems[row][field] = input.value;
+}
+
+// ── 重算小计和合计 ──
+function qtRowCalc(row) {
+  const qtyEl   = document.querySelector(`input[data-row="${row}"][data-field="quantity"]`);
+  const priceEl = document.querySelector(`input[data-row="${row}"][data-field="unit_price"]`);
+  if (!qtyEl || !priceEl) return;
+  const qty   = parseFloat(qtyEl.value)   || 0;
+  const price = parseFloat(priceEl.value) || 0;
+  _qtPreviewItems[row].quantity   = qty;
+  _qtPreviewItems[row].unit_price = price;
+  const subtotal = (qty * price).toFixed(2);
+  const el = document.getElementById(`qt-subtotal-${row}`);
+  if (el) el.textContent = subtotal;
+  // 更新合计
+  const total = _qtPreviewItems.reduce((s,it) => s + (it.unit_price||0)*(it.quantity??1), 0);
+  const tc = document.getElementById('qt-total-cell');
+  if (tc) tc.textContent = total.toFixed(2);
+}
+
+// ── 删除行 ──
+function qtRowDelete(row) {
+  _qtPreviewItems.splice(row, 1);
+  qtRenderPreview(true);
+}
+
+// ── 新增行 ──
+function qtRowAdd() {
+  _qtPreviewItems.push({ name:'', brand:'', model:'', description:'', unit:'PCS', unit_price:0, quantity:1 });
+  qtRenderPreview(true);
+  // 聚焦新行的产品名称输入框
+  setTimeout(() => {
+    const idx = _qtPreviewItems.length - 1;
+    document.querySelector(`input[data-row="${idx}"][data-field="name"]`)?.focus();
+  }, 30);
+}
+
+// ── 保存 ──
+async function qtPreviewSave() {
+  // 从 DOM 收集最新数据（防止未触发 change 的输入框）
+  _qtPreviewItems.forEach((item, i) => {
+    ['name','brand','model','description','unit'].forEach(f => {
+      const el = document.querySelector(`input[data-row="${i}"][data-field="${f}"]`);
+      if (el) item[f] = el.value;
+    });
+    const qtyEl   = document.querySelector(`input[data-row="${i}"][data-field="quantity"]`);
+    const priceEl = document.querySelector(`input[data-row="${i}"][data-field="unit_price"]`);
+    if (qtyEl)   item.quantity   = parseFloat(qtyEl.value)   || 0;
+    if (priceEl) item.unit_price = parseFloat(priceEl.value) || 0;
+  });
+  // 过滤掉完全空白的行
+  const validItems = _qtPreviewItems.filter(it => it.name || it.unit_price);
+  const total = validItems.reduce((s,it) => s + (it.unit_price||0)*(it.quantity??1), 0);
+  const newDate = document.getElementById('qt-edit-date')?.value || _qtPreviewQuote.date;
+  const newTax  = document.getElementById('qt-edit-tax')?.value  || _qtPreviewQuote.tax_info || '';
+
+  const saveBtn = document.querySelector('#qt-preview-footer button[onclick*="qtPreviewSave"]');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中…'; }
+
+  try {
+    await api('PUT', '/quotations/' + _qtPreviewQuoteId, {
+      ..._qtPreviewQuote,
+      date:         newDate,
+      tax_info:     newTax,
+      items:        JSON.stringify(validItems),
+      total_amount: total,
+    });
+    _qtPreviewItems   = validItems;
+    _qtPreviewQuote   = { ..._qtPreviewQuote, date: newDate, tax_info: newTax, items: JSON.stringify(validItems), total_amount: total };
+    qtRenderPreview(false); // 切回查看模式
+    loadPage();             // 刷新列表
+  } catch(e) {
+    alert('保存失败：' + e.message);
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '💾 保存'; }
+  }
+}
+
+// ============================================================
+// 合同模板管理 & 导出
+// ============================================================
+
+// ── 导出弹窗 ──────────────────────────────────────────────────
+async function ctOpenExportModal(contractId) {
+  const res = await api('GET', '/contract-templates').catch(() => ({ templates: [] }));
+  const templates = (res.templates || []);
+  const lastTpl = localStorage.getItem('ct_last_tpl') || '0';
+
+  const tplList = templates.length
+    ? templates.map(t => `
+        <div class="ct-tpl-item" data-val="${t.id}"
+          style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+                 border:2px solid ${lastTpl===String(t.id)?'var(--accent)':'var(--border)'};
+                 border-radius:8px;margin-bottom:6px;cursor:pointer;background:var(--bg2)"
+          onclick="ctSelectTpl(this,'${t.id}')">
+          <input type="radio" name="ct-tpl" value="${t.id}" ${lastTpl===String(t.id)?'checked':''}
+            style="margin-top:2px;flex-shrink:0;pointer-events:none">
+          <div>
+            <div style="font-size:13px;font-weight:500;color:${lastTpl===String(t.id)?'var(--accent)':'var(--text)'}">
+              ${t.file_type==='html'?'🌐':'📄'} ${escHtml(t.name)}
+            </div>
+            ${t.description?`<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(t.description)}</div>`:''}
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">
+              ${t.file_type==='html'?'HTML模板（可打印PDF）':'Word模板（.docx）'} · ${t.is_public?'📢 公共':'🔒 私有'}
+            </div>
+          </div>
+        </div>`).join('')
+    : '<div style="padding:20px;text-align:center;color:var(--text3);font-size:13px">暂无模板，请先在模板管理中上传</div>';
+
+  showModal(`
+  <div class="modal">
+    <div class="modal-header">📥 导出合同<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">
+        选择导出模板：Word模板导出 .docx，HTML模板可在浏览器打印为 PDF
+      </div>
+      ${tplList}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="ctDoExport(${contractId})">📥 导出</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+}
+
+function ctSelectTpl(el, val) {
+  document.querySelectorAll('.ct-tpl-item').forEach(item => {
+    item.style.borderColor = 'var(--border)';
+    const r = item.querySelector('input[type=radio]');
+    if (r) r.checked = false;
+    const t = item.querySelector('div > div:first-child');
+    if (t) t.style.color = 'var(--text)';
+  });
+  el.style.borderColor = 'var(--accent)';
+  const r = el.querySelector('input[type=radio]');
+  if (r) r.checked = true;
+  const t = el.querySelector('div > div:first-child');
+  if (t) t.style.color = 'var(--accent)';
+}
+
+async function ctDoExport(contractId) {
+  const radio = document.querySelector('input[name="ct-tpl"]:checked');
+  const templateId = radio ? radio.value : '0';
+  if (!templateId || templateId === '0') { alert('请选择导出模板'); return; }
+  localStorage.setItem('ct_last_tpl', templateId);
+  closeModal();
+
+  // 判断是否 HTML 模板（从模板数据的 file_type 判断）
+  const allTpls = (await api('GET', '/contract-templates').catch(() => ({ templates: [] }))).templates || [];
+  const selectedTpl = allTpls.find(t => String(t.id) === String(templateId));
+  const isHtml = selectedTpl?.file_type === 'html';
+
+  if (isHtml) {
+    // HTML 模板：新标签页打开，用户可直接 Ctrl+P 另存 PDF
+    window.open(`/pages/contract/${contractId}?template=${templateId}&token=${encodeURIComponent(state.token)}`, '_blank');
+    return;
+  }
+
+  // Word 模板：fetch 下载 .docx
+  try {
+    const res = await fetch(`/api/contracts/${contractId}/export?template_id=${templateId}`, {
+      headers: { 'Authorization': 'Bearer ' + state.token }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('导出失败：' + (err.error || res.statusText));
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const matchStar = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    const matchPlain = cd.match(/filename="([^"]+)"/);
+    const filename = matchStar
+      ? decodeURIComponent(matchStar[1])
+      : matchPlain ? matchPlain[1] : `合同_${contractId}.docx`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } catch(e) { alert('导出失败：' + e.message); }
+}
+
+// ── 模板管理弹窗 ──────────────────────────────────────────────
+async function ctOpenTemplateManager() {
+  const res = await api('GET', '/contract-templates').catch(() => ({ templates: [] }));
+  const templates = res.templates || [];
+  const isAdmin = state.user?.is_admin;
+
+  const renderList = (tpls) => {
+    if (!tpls.length) return '<div style="padding:20px;text-align:center;color:var(--text3)">暂无模板</div>';
+    return tpls.map(t => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+                  border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--bg2)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500;color:var(--text)">
+            ${t.file_type==='html'?'🌐':'📄'} ${escHtml(t.name)}
+          </div>
+          ${t.description?`<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(t.description)}</div>`:''}
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">
+            ${t.file_type==='html'?'HTML':'Word(.docx)'} · ${t.is_public?'📢 公共':'🔒 私有'} · ${t.created_at?.slice(0,10)||''}
+          </div>
+        </div>
+        <button onclick="ctDownloadTemplate(${t.id},'${escHtml(t.name)}','${t.file_type}')"
+          style="background:none;border:1px solid var(--border);border-radius:6px;
+                 padding:4px 8px;cursor:pointer;font-size:12px;color:var(--text2);flex-shrink:0">⬇️ 下载</button>
+        <button onclick="ctDeleteTemplate(${t.id})"
+          style="background:none;border:1px solid var(--red);border-radius:6px;
+                 padding:4px 8px;cursor:pointer;font-size:12px;color:var(--red);flex-shrink:0">删除</button>
+      </div>`).join('');
+  };
+
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">📋 合同模板管理<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <!-- 字段说明 -->
+      <details style="margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text3)">
+          📖 模板字段说明（点击展开）
+        </summary>
+        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px">
+          <div>
+            <div style="font-weight:600;color:var(--text2);margin-bottom:6px">头部字段（单值替换）</div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;color:var(--text3)">
+              <code style="color:var(--accent)">{{contract_number}}</code><span>合同编号</span>
+              <code style="color:var(--accent)">{{sign_date}}</code><span>签订日期</span>
+              <code style="color:var(--accent)">{{company_name}}</code><span>甲方（客户）</span>
+              <code style="color:var(--accent)">{{party_b}}</code><span>乙方（本公司）</span>
+              <code style="color:var(--accent)">{{amount}}</code><span>合同金额</span>
+              <code style="color:var(--accent)">{{contact_name}}</code><span>联系人</span>
+              <code style="color:var(--accent)">{{phone}}</code><span>电话</span>
+              <code style="color:var(--accent)">{{remarks}}</code><span>备注/条款</span>
+              <code style="color:var(--accent)">{{quote_number}}</code><span>报价单号</span>
+              <code style="color:var(--accent)">{{tax_info}}</code><span>税率</span>
+              <code style="color:var(--accent)">{{total_amount}}</code><span>报价合计</span>
+              <code style="color:var(--accent)">{{export_date}}</code><span>导出日期</span>
+            </div>
+          </div>
+          <div>
+            <div style="font-weight:600;color:var(--text2);margin-bottom:6px">明细行字段（{{#ROW}}…{{/ROW}} 之间）</div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;color:var(--text3)">
+              <code style="color:var(--green)">{{seq}}</code><span>序号</span>
+              <code style="color:var(--green)">{{name}}</code><span>产品名称</span>
+              <code style="color:var(--green)">{{brand}}</code><span>品牌</span>
+              <code style="color:var(--green)">{{model}}</code><span>型号</span>
+              <code style="color:var(--green)">{{description}}</code><span>规格/描述</span>
+              <code style="color:var(--green)">{{unit}}</code><span>单位</span>
+              <code style="color:var(--green)">{{quantity}}</code><span>数量</span>
+              <code style="color:var(--green)">{{unit_price}}</code><span>单价</span>
+              <code style="color:var(--green)">{{subtotal}}</code><span>小计</span>
+            </div>
+            <div style="margin-top:8px;padding:8px;background:var(--bg3);border-radius:6px;font-size:11px;color:var(--text3)">
+              💡 无关联报价单时明细行输出"详见明细"<br>
+              Word模板：在表格数据行写字段标记即可<br>
+              HTML模板：支持直接打印为PDF
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- 上传 -->
+      <div style="border:1px dashed var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
+        <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px">
+          ＋ 上传模板 ${isAdmin?'<span style="font-size:11px;color:var(--text3)">（管理员上传为公共模板）</span>':'<span style="font-size:11px;color:var(--text3)">（普通用户上传为私有模板）</span>'}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label style="font-size:12px;color:var(--text3)">模板名称 *</label>
+            <input id="ct-new-name" placeholder="如：标准合同模板" style="width:100%;margin-top:4px"></div>
+          <div><label style="font-size:12px;color:var(--text3)">说明</label>
+            <input id="ct-new-desc" placeholder="可选" style="width:100%;margin-top:4px"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="file" id="ct-new-file" accept=".docx,.html,.htm"
+            style="flex:1;font-size:12px;color:var(--text2)">
+          <button class="btn btn-primary btn-sm" onclick="ctUploadTemplate()">上传</button>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">支持 .docx（Word模板）和 .html（HTML模板）</div>
+      </div>
+
+      <!-- 列表 -->
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">已有模板（${templates.length} 个）</div>
+      <div id="ct-tpl-list">${renderList(templates)}</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">关闭</button>
+    </div>
+  </div>`);
+  document.getElementById('modal-close').onclick = closeModal;
+}
+
+async function ctUploadTemplate() {
+  const name = document.getElementById('ct-new-name')?.value.trim();
+  const desc = document.getElementById('ct-new-desc')?.value.trim() || '';
+  const fileInput = document.getElementById('ct-new-file');
+  const file = fileInput?.files?.[0];
+  if (!name) { alert('请填写模板名称'); return; }
+  if (!file) { alert('请选择文件'); return; }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('description', desc);
+  fd.append('file', file);
+
+  try {
+    const res = await fetch('/api/contract-templates', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd,
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('上传失败：' + (data.error || res.statusText)); return; }
+    closeModal();
+    ctOpenTemplateManager();
+  } catch(e) { alert('上传失败：' + e.message); }
+}
+
+async function ctDeleteTemplate(id) {
+  if (!confirm('确认删除此模板？')) return;
+  await api('DELETE', `/contract-templates/${id}`);
+  closeModal();
+  ctOpenTemplateManager();
+}
+
+function ctDownloadTemplate(id, name, fileType) {
+  const ext = fileType === 'html' ? '.html' : '.docx';
+  fetch(`/api/contract-templates/${id}/download`, {
+    headers: { 'Authorization': 'Bearer ' + state.token }
+  }).then(r => r.blob()).then(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name + ext;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+}
+
+// ============================================================
+// 数据中心：高级筛选
+// ============================================================
+
+const DC_OPS = {
+  text: [
+    { v: 'contains',     l: '包含' },
+    { v: 'not_contains', l: '不包含' },
+    { v: 'eq',           l: '等于' },
+    { v: 'neq',          l: '不等于' },
+    { v: 'starts',       l: '开头是' },
+    { v: 'empty',        l: '为空' },
+    { v: 'not_empty',    l: '不为空' },
+  ],
+  number: [
+    { v: 'eq',      l: '等于' },
+    { v: 'neq',     l: '不等于' },
+    { v: 'gt',      l: '大于' },
+    { v: 'lt',      l: '小于' },
+    { v: 'gte',     l: '≥' },
+    { v: 'lte',     l: '≤' },
+    { v: 'between', l: '范围' },
+    { v: 'empty',   l: '为空' },
+    { v: 'not_empty', l: '不为空' },
+  ],
+  date: [
+    { v: 'eq',      l: '等于' },
+    { v: 'gt',      l: '晚于' },
+    { v: 'lt',      l: '早于' },
+    { v: 'between', l: '范围' },
+    { v: 'empty',   l: '为空' },
+    { v: 'not_empty', l: '不为空' },
+  ],
+};
+
+function dcFieldType(fid) {
+  if (!_dcActiveTable) return 'text';
+  if (fid === 'id') return 'number';
+  if (fid === 'created_at') return 'date';
+  const f = (_dcActiveTable.fields || []).find(f => f.id === fid);
+  return f?.type || 'text';
+}
+
+// 列头 ▼ 弹出单列筛选面板
+function dcOpenColFilter(fid) {
+  const fields = dcGetVisibleFields();
+  const field = fid === 'id'
+    ? { id: 'id', name: '#', type: 'number' }
+    : fields.find(f => f.id === fid) || { id: fid, name: fid, type: 'text' };
+
+  const existing = (_dcFilters || []).find(f => f.field === fid) || {};
+  const ftype = field.type || 'text';
+  const ops = DC_OPS[ftype] || DC_OPS.text;
+  const curOp = existing.op || ops[0].v;
+
+  dcShowModal(`
+  <div class="modal">
+    <div class="modal-header">筛选：${escHtml(field.name)}<span class="modal-close" onclick="dcCloseModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>筛选方式</label>
+        <select id="dcf-op" onchange="dcfOpChange(this.value)">
+          ${ops.map(o=>`<option value="${o.v}" ${curOp===o.v?'selected':''}>${o.l}</option>`).join('')}
+        </select>
+      </div>
+      <div id="dcf-val-wrap">
+        ${dcfValHtml(curOp, existing.value||'', existing.value2||'')}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="dcColFilterClear('${fid}')">清除此列</button>
+      <button class="btn" onclick="dcCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcColFilterApply('${fid}')">应用</button>
+    </div>
+  </div>`);
+}
+
+function dcfValHtml(op, val, val2) {
+  if (op === 'empty' || op === 'not_empty') return '';
+  if (op === 'between') return `
+    <div class="form-row">
+      <div class="form-group"><label>从</label><input id="dcf-val" value="${escHtml(val)}" placeholder="起始值"></div>
+      <div class="form-group"><label>到</label><input id="dcf-val2" value="${escHtml(val2)}" placeholder="结束值"></div>
+    </div>`;
+  return `<div class="form-group"><label>值</label><input id="dcf-val" value="${escHtml(val)}" placeholder="输入筛选值"></div>`;
+}
+
+function dcfOpChange(op) {
+  const wrap = document.getElementById('dcf-val-wrap');
+  if (wrap) wrap.innerHTML = dcfValHtml(op, '', '');
+}
+
+function dcColFilterApply(fid) {
+  const op = document.getElementById('dcf-op')?.value;
+  const val = document.getElementById('dcf-val')?.value?.trim() || '';
+  const val2 = document.getElementById('dcf-val2')?.value?.trim() || '';
+  if (!op) return;
+  if (op !== 'empty' && op !== 'not_empty' && !val) {
+    alert('请输入筛选值'); return;
+  }
+  _dcFilters = (_dcFilters || []).filter(f => f.field !== fid);
+  _dcFilters.push({ field: fid, op, value: val, value2: val2 });
+  dcCloseModal();
+  _dcPage = 1;
+  dcRenderFilterTags();
+  dcLoadRows();
+}
+
+function dcColFilterClear(fid) {
+  _dcFilters = (_dcFilters || []).filter(f => f.field !== fid);
+  dcCloseModal();
+  _dcPage = 1;
+  dcRenderFilterTags();
+  dcLoadRows();
+}
+
+// 高级筛选弹窗（多条件）
+function dcAdvRowHtml(f, i) {
+  const fields = dcGetVisibleFields();
+  const allFields = [{ id: 'id', name: '#', type: 'number' }, ...fields];
+  const ftype = dcFieldType(f.field || 'id');
+  const ops = DC_OPS[ftype] || DC_OPS.text;
+  const needVal = f.op !== 'empty' && f.op !== 'not_empty';
+  const isBetween = f.op === 'between';
+  return `
+  <div id="adv-row-${i}" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+    <select style="flex:1;min-width:100px" onchange="dcAdvRowFieldChange(${i},this.value)">
+      ${allFields.map(af=>`<option value="${af.id}" ${f.field===af.id?'selected':''}>${escHtml(af.name)}</option>`).join('')}
+    </select>
+    <select id="adv-op-${i}" style="flex:1;min-width:90px" onchange="dcAdvRowOpChange(${i},this.value)">
+      ${ops.map(o=>`<option value="${o.v}" ${f.op===o.v?'selected':''}>${o.l}</option>`).join('')}
+    </select>
+    <span id="adv-val-wrap-${i}" style="display:contents">
+      ${needVal && !isBetween ? `<input id="adv-val-${i}" style="flex:2;min-width:120px" value="${escHtml(f.value||'')}" placeholder="值">` : ''}
+      ${isBetween ? `<input id="adv-val-${i}" style="flex:1;min-width:80px" value="${escHtml(f.value||'')}" placeholder="从"><input id="adv-val2-${i}" style="flex:1;min-width:80px" value="${escHtml(f.value2||'')}" placeholder="到">` : ''}
+      ${!needVal ? `<span style="flex:2;font-size:12px;color:var(--text3)">(无需填值)</span>` : ''}
+    </span>
+    <button onclick="dcAdvRemoveRow(${i})" style="background:none;border:none;cursor:pointer;color:var(--red);font-size:16px;padding:2px 4px">✕</button>
+  </div>`;
+}
+
+function dcOpenAdvFilter() {
+  const fields = dcGetVisibleFields();
+  const allFields = [{ id: 'id', name: '#', type: 'number' }, ...fields];
+  const existingFilters = _dcFilters?.length
+    ? _dcFilters
+    : [{ field: allFields[0]?.id || 'id', op: 'contains', value: '', value2: '' }];
+  window._dcAdvFilters = existingFilters.map(f => ({ ...f }));
+
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">🔍 高级筛选<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+        <span style="font-size:12px;color:var(--text2);font-weight:600">条件组合：</span>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+          <input type="radio" name="dc-logic" value="AND" ${(_dcFilterLogic||'AND')==='AND'?'checked':''}> AND（全部满足）
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+          <input type="radio" name="dc-logic" value="OR" ${_dcFilterLogic==='OR'?'checked':''}> OR（任一满足）
+        </label>
+      </div>
+      <div id="adv-filter-rows">
+        ${window._dcAdvFilters.map((f, i) => dcAdvRowHtml(f, i)).join('')}
+      </div>
+      <button class="btn btn-sm" onclick="dcAdvAddRow()" style="margin-top:8px">＋ 添加条件</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="dcClearFilters();closeModal()">清除全部</button>
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcAdvApply()">应用筛选</button>
+    </div>
+  </div>`);
+}
+
+function dcAdvAddRow() {
+  const fields = dcGetVisibleFields();
+  const allFields = [{ id: 'id', name: '#', type: 'number' }, ...fields];
+  dcAdvSaveCurrent();
+  const newF = { field: allFields[0]?.id || 'id', op: 'contains', value: '', value2: '' };
+  window._dcAdvFilters = window._dcAdvFilters || [];
+  window._dcAdvFilters.push(newF);
+  const container = document.getElementById('adv-filter-rows');
+  if (container) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = dcAdvRowHtml(newF, window._dcAdvFilters.length - 1);
+    container.appendChild(tmp.firstElementChild);
+  }
+}
+
+function dcAdvRemoveRow(i) {
+  dcAdvSaveCurrent();
+  window._dcAdvFilters = (window._dcAdvFilters || []).filter((_, idx) => idx !== i);
+  const container = document.getElementById('adv-filter-rows');
+  if (container) {
+    container.innerHTML = window._dcAdvFilters.map((f, idx) => dcAdvRowHtml(f, idx)).join('');
+  }
+}
+
+function dcAdvSaveCurrent() {
+  (window._dcAdvFilters || []).forEach((f, i) => {
+    const op = document.getElementById(`adv-op-${i}`)?.value;
+    const val = document.getElementById(`adv-val-${i}`)?.value || '';
+    const val2 = document.getElementById(`adv-val2-${i}`)?.value || '';
+    if (op) f.op = op;
+    f.value = val;
+    f.value2 = val2;
+  });
+}
+
+function dcAdvRowFieldChange(i, fid) {
+  dcAdvSaveCurrent();
+  if (window._dcAdvFilters?.[i]) {
+    window._dcAdvFilters[i].field = fid;
+    const ftype = dcFieldType(fid);
+    window._dcAdvFilters[i].op = (DC_OPS[ftype] || DC_OPS.text)[0].v;
+    window._dcAdvFilters[i].value = '';
+    window._dcAdvFilters[i].value2 = '';
+  }
+  // 只更新 op select 和 value wrap，不重建整个弹窗
+  const f = window._dcAdvFilters?.[i];
+  if (!f) return;
+  const ftype = dcFieldType(f.field);
+  const ops = DC_OPS[ftype] || DC_OPS.text;
+  const opSel = document.getElementById(`adv-op-${i}`);
+  if (opSel) {
+    opSel.innerHTML = ops.map(o=>`<option value="${o.v}" ${f.op===o.v?'selected':''}>${o.l}</option>`).join('');
+  }
+  dcAdvRowOpChange(i, f.op);
+}
+
+function dcAdvRowOpChange(i, op) {
+  if (window._dcAdvFilters?.[i]) window._dcAdvFilters[i].op = op;
+  const valWrap = document.getElementById(`adv-val-wrap-${i}`);
+  if (!valWrap) return;
+  const needVal = op !== 'empty' && op !== 'not_empty';
+  const isBetween = op === 'between';
+  const curVal = window._dcAdvFilters?.[i]?.value || '';
+  const curVal2 = window._dcAdvFilters?.[i]?.value2 || '';
+  valWrap.innerHTML = needVal && !isBetween
+    ? `<input id="adv-val-${i}" style="flex:2;min-width:120px" value="${escHtml(curVal)}" placeholder="值">`
+    : isBetween
+      ? `<input id="adv-val-${i}" style="flex:1;min-width:80px" value="${escHtml(curVal)}" placeholder="从"><input id="adv-val2-${i}" style="flex:1;min-width:80px" value="${escHtml(curVal2)}" placeholder="到">`
+      : `<span style="flex:2;font-size:12px;color:var(--text3)">(无需填值)</span>`;
+}
+
+function dcAdvApply() {
+  dcAdvSaveCurrent();
+  const rows = window._dcAdvFilters || [];
+  const logic = document.querySelector('input[name="dc-logic"]:checked')?.value || 'AND';
+  const filters = [];
+  rows.forEach((f, i) => {
+    const op = f.op;
+    const val = f.value?.trim() || '';
+    const val2 = f.value2?.trim() || '';
+    if (op === 'empty' || op === 'not_empty' || val) {
+      filters.push({ field: f.field, op, value: val, value2: val2 });
+    }
+  });
+  _dcFilters = filters;
+  _dcFilterLogic = logic;
+  closeModal();
+  _dcPage = 1;
+  dcRenderFilterTags();
+  dcLoadRows();
+}
+
+
+function dcClearFilters() {
+  _dcFilters = [];
+  dcRenderFilterTags();
+  _dcPage = 1;
+  dcLoadRows();
+}
+
+function dcRenderFilterTags() {
+  const tags = document.getElementById('dc-filter-tags');
+  const clearBtn = document.getElementById('dc-clear-filter-btn');
+  const advBtn = document.getElementById('dc-adv-filter-btn');
+  if (!tags) return;
+
+  if (!_dcFilters?.length) {
+    tags.innerHTML = '';
+    if (clearBtn) clearBtn.style.display = 'none';
+    if (advBtn) advBtn.style.color = '';
+    return;
+  }
+
+  if (clearBtn) clearBtn.style.display = '';
+  if (advBtn) advBtn.style.color = 'var(--accent)';
+
+  const opLabel = { eq:'=', neq:'≠', contains:'包含', not_contains:'不含',
+    starts:'开头', gt:'>', lt:'<', gte:'≥', lte:'≤', between:'范围', empty:'为空', not_empty:'不为空' };
+
+  const fields = [...dcGetVisibleFields(), { id:'id', name:'#', type:'number' }];
+  tags.innerHTML = _dcFilters.map((f, i) => {
+    const field = fields.find(ff => ff.id === f.field);
+    const fname = field?.name || f.field;
+    const label = f.op === 'between'
+      ? `${fname} ${f.value}~${f.value2}`
+      : f.op === 'empty' || f.op === 'not_empty'
+        ? `${fname} ${opLabel[f.op]||f.op}`
+        : `${fname} ${opLabel[f.op]||f.op} "${f.value}"`;
+    return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+      background:rgba(46,117,182,.12);color:var(--accent);border:1px solid var(--accent);
+      border-radius:20px;font-size:11px">
+      ${escHtml(label)}
+      <span onclick="dcColFilterClear('${f.field}')" style="cursor:pointer;font-size:13px;line-height:1;opacity:.7">×</span>
+    </span>`;
+  }).join('');
+}
+
+// ============================================================
+// 数据中心：模板管理 & 导出
+// ============================================================
+
+async function dcOpenTemplateExport() {
+  if (!_dcActiveTable) return;
+  const tableId = _dcActiveTable.id;
+  const res = await api('GET', `/dc/templates?table_id=${tableId}`).catch(() => ({ templates: [] }));
+  const templates = res.templates || [];
+  const lastTpl = localStorage.getItem(`dc_last_tpl_${tableId}`) || '0';
+
+  const tplHtml = templates.length
+    ? templates.map(t => {
+        const icon = t.file_type === 'html' ? '🌐' : t.file_type === 'docx' ? '📄' : '📊';
+        const scope = t.table_id > 0 ? '📌 本表' : '🌍 全局';
+        return `
+        <div class="dc-tpl-item" data-id="${t.id}" data-type="${t.file_type}"
+          style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+            border:2px solid ${lastTpl===String(t.id)?'var(--accent)':'var(--border)'};
+            border-radius:8px;margin-bottom:6px;cursor:pointer;background:var(--bg2)"
+          onclick="dcSelectTpl(this,'${t.id}')">
+          <input type="radio" name="dc-tpl" value="${t.id}" ${lastTpl===String(t.id)?'checked':''}
+            style="margin-top:2px;flex-shrink:0;pointer-events:none">
+          <div>
+            <div style="font-size:13px;font-weight:500;color:${lastTpl===String(t.id)?'var(--accent)':'var(--text)'}">
+              ${icon} ${escHtml(t.name)}
+            </div>
+            ${t.description?`<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(t.description)}</div>`:''}
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">
+              ${t.file_type.toUpperCase()} · ${scope} · ${t.is_public?'📢 公共':'🔒 私有'}
+            </div>
+          </div>
+        </div>`;
+      }).join('')
+    : '<div style="padding:20px;text-align:center;color:var(--text3);font-size:13px">暂无模板，请先在模板管理中上传</div>';
+
+  const filterCount = (_dcFilters||[]).length;
+  showModal(`
+  <div class="modal">
+    <div class="modal-header">📋 模板导出 — ${escHtml(_dcActiveTable.name)}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      ${filterCount ? `<div style="padding:8px 12px;background:rgba(46,117,182,.08);border-radius:6px;font-size:12px;color:var(--accent);margin-bottom:12px">
+        📌 当前有 ${filterCount} 个筛选条件，将导出过滤后的数据
+      </div>` : ''}
+      ${tplHtml}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="dcDoTemplateExport(${tableId})">📥 导出</button>
+    </div>
+  </div>`);
+}
+
+function dcSelectTpl(el, val) {
+  document.querySelectorAll('.dc-tpl-item').forEach(item => {
+    item.style.borderColor = 'var(--border)';
+    const r = item.querySelector('input[type=radio]');
+    if (r) r.checked = false;
+    const t = item.querySelector('div>div:first-child');
+    if (t) t.style.color = 'var(--text)';
+  });
+  el.style.borderColor = 'var(--accent)';
+  const r = el.querySelector('input[type=radio]');
+  if (r) r.checked = true;
+  const t = el.querySelector('div>div:first-child');
+  if (t) t.style.color = 'var(--accent)';
+}
+
+async function dcDoTemplateExport(tableId) {
+  const radio = document.querySelector('input[name="dc-tpl"]:checked');
+  const templateId = radio?.value || '0';
+  if (!templateId || templateId === '0') { alert('请选择导出模板'); return; }
+  localStorage.setItem(`dc_last_tpl_${tableId}`, templateId);
+
+  const fileType = document.querySelector(`.dc-tpl-item[data-id="${templateId}"]`)?.dataset?.type || 'xlsx';
+  closeModal();
+
+  if (fileType === 'html') {
+    // HTML 模板：直接在浏览器打开 /pages/datacenter/:id，用户可 Ctrl+P 打印为 PDF
+    const filtersParam = encodeURIComponent(JSON.stringify(_dcFilters || []));
+    const logic = _dcFilterLogic || 'AND';
+    const url = `/pages/datacenter/${tableId}?template=${templateId}&filters=${filtersParam}&logic=${logic}&sort_by=${_dcSortBy}&sort_dir=${_dcSortDir}&token=${encodeURIComponent(state.token)}`;
+    window.open(url, '_blank');
+    return;
+  }
+
+  // xlsx / docx：下载
+  try {
+    const body = {
+      filters: _dcFilters || [],
+      logic: _dcFilterLogic || 'AND',
+      sort_by: _dcSortBy,
+      sort_dir: _dcSortDir,
+    };
+    const res = await fetch(`/api/dc/tables/${tableId}/export?template_id=${templateId}`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { const e = await res.json().catch(()=>{}); alert('导出失败：' + (e?.error||res.statusText)); return; }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    const filename = m ? decodeURIComponent(m[1]) : `导出_${tableId}.${fileType}`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } catch(e) { alert('导出失败：' + e.message); }
+}
+
+async function dcOpenTemplateManager() {
+  if (!_dcActiveTable) return;
+  const tableId = _dcActiveTable.id;
+  const tableName = _dcActiveTable.name;
+  const res = await api('GET', `/dc/templates?table_id=${tableId}`).catch(() => ({ templates: [] }));
+  const templates = res.templates || [];
+  const isAdmin = !!state.user?.is_admin;
+
+  const globalTpls = templates.filter(t => t.table_id === 0);
+  const tableTpls  = templates.filter(t => t.table_id > 0);
+
+  const renderList = (tpls, label) => {
+    if (!tpls.length) return `<div style="color:var(--text3);font-size:12px;padding:8px 0">暂无${label}模板</div>`;
+    return tpls.map(t => {
+      const icon = t.file_type === 'html' ? '🌐' : t.file_type === 'docx' ? '📄' : '📊';
+      return `
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;
+        border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--bg2)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500">${icon} ${escHtml(t.name)}</div>
+          ${t.description?`<div style="font-size:11px;color:var(--text3);margin-top:1px">${escHtml(t.description)}</div>`:''}
+          <div style="font-size:11px;color:var(--text3);margin-top:1px">
+            ${t.file_type.toUpperCase()} · ${t.is_public?'📢 公共':'🔒 私有'} · ${(t.created_at||'').slice(0,10)}
+          </div>
+        </div>
+        <button onclick="dcTplDownload(${t.id},'${escHtml(t.name)}','${t.file_type}')"
+          style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px">⬇️</button>
+        <button onclick="dcTplDelete(${t.id})"
+          style="background:none;border:1px solid var(--red);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;color:var(--red)">删除</button>
+      </div>`;
+    }).join('');
+  };
+
+  showModal(`
+  <div class="modal modal-lg">
+    <div class="modal-header">⚙️ 模板管理 — ${escHtml(tableName)}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <!-- 骨架模板下载 -->
+      <div style="padding:10px 14px;background:rgba(46,117,182,.07);border-radius:8px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:13px;font-weight:500;color:var(--text)">📥 下载骨架模板</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">含当前表所有字段标记的 Excel 参考模板</div>
+        </div>
+        <button class="btn btn-sm" onclick="dcDownloadSkeleton(${tableId})">下载</button>
+      </div>
+
+      <!-- 上传新模板 -->
+      <div style="border:1px dashed var(--border);border-radius:8px;padding:14px;margin-bottom:16px">
+        <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px">
+          ＋ 上传新模板 ${isAdmin?'<span style="font-size:11px;color:var(--text3)">（管理员上传为公共）</span>':'<span style="font-size:11px;color:var(--text3)">（上传为私有）</span>'}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label style="font-size:12px;color:var(--text3)">模板名称 *</label>
+            <input id="dctpl-name" placeholder="如：标准报告模板" style="width:100%;margin-top:4px"></div>
+          <div><label style="font-size:12px;color:var(--text3)">说明</label>
+            <input id="dctpl-desc" placeholder="可选" style="width:100%;margin-top:4px"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label style="font-size:12px;color:var(--text3)">关联范围</label>
+            <select id="dctpl-scope" style="width:100%;margin-top:4px">
+              <option value="0">🌍 全局通用（所有数据表）</option>
+              <option value="${tableId}" selected>📌 仅限本表（${escHtml(tableName)}）</option>
+            </select>
+          </div>
+          <div><label style="font-size:12px;color:var(--text3)">文件</label>
+            <input type="file" id="dctpl-file" accept=".xlsx,.docx,.html,.htm"
+              style="width:100%;margin-top:4px;font-size:12px"></div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="dcTplUpload(${tableId})">上传</button>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">支持 .xlsx / .docx / .html</div>
+      </div>
+
+      <!-- 本表模板 -->
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📌 本表专属模板（${tableTpls.length} 个）</div>
+      ${renderList(tableTpls, '本表专属')}
+
+      <!-- 全局模板 -->
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin:14px 0 8px">🌍 全局通用模板（${globalTpls.length} 个）</div>
+      ${renderList(globalTpls, '全局通用')}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">关闭</button>
+    </div>
+  </div>`);
+}
+
+async function dcTplUpload(tableId) {
+  const name = document.getElementById('dctpl-name')?.value.trim();
+  const desc = document.getElementById('dctpl-desc')?.value.trim() || '';
+  const scope = document.getElementById('dctpl-scope')?.value || '0';
+  const file = document.getElementById('dctpl-file')?.files?.[0];
+  if (!name) { alert('请填写模板名称'); return; }
+  if (!file) { alert('请选择文件'); return; }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('description', desc);
+  fd.append('table_id', scope);
+  fd.append('file', file);
+
+  try {
+    const res = await fetch('/api/dc/templates', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd,
+    });
+    const data = await res.json();
+    if (!res.ok) { alert('上传失败：' + (data.error || res.statusText)); return; }
+    closeModal();
+    dcOpenTemplateManager();
+  } catch(e) { alert('上传失败：' + e.message); }
+}
+
+async function dcTplDelete(id) {
+  if (!confirm('确认删除此模板？')) return;
+  await api('DELETE', `/dc/templates/${id}`);
+  closeModal();
+  dcOpenTemplateManager();
+}
+
+function dcTplDownload(id, name, fileType) {
+  const ext = { xlsx: '.xlsx', docx: '.docx', html: '.html' }[fileType] || '.xlsx';
+  fetch(`/api/dc/templates/${id}/download`, {
+    headers: { 'Authorization': 'Bearer ' + state.token }
+  }).then(r => r.blob()).then(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name + ext;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+}
+
+function dcDownloadSkeleton(tableId) {
+  fetch(`/api/dc/templates/skeleton?table_id=${tableId}`, {
+    headers: { 'Authorization': 'Bearer ' + state.token }
+  }).then(r => r.blob()).then(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (_dcActiveTable?.name || '数据') + '_模板骨架.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+}
+
+// ── 数据中心弹窗辅助（复用showModal但样式独立）────────────────────────────
+function dcShowModal(html) { showModal(html); }
+function dcCloseModal() { closeModal(); }
 
 // INIT
 // ============================================================
