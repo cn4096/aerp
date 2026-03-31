@@ -763,6 +763,7 @@ function renderSidebar() {
     { section: '分析' },
     { id: 'reports', icon: '📈', label: '报表中心' },
     { id: 'datacenter', icon: '🗄️', label: '数据中心' },
+    { id: 'appcenter',  icon: '🧩', label: '应用中心' },
     { section: '系统' },
     { id: 'users',     icon: '👥', label: '员工管理', adminOnly: true },
     { id: 'sysadmin',  icon: '⚙️', label: '系统设置', adminOnly: true },
@@ -889,6 +890,28 @@ function closeModal() {
   state.modalData = null;
   render();
   loadPage();
+}
+
+// ── 应用中心专用弹窗系统（完全绕开 render()/loadPage()）────────────────────
+// 与数据中心的 dcShowModal/dcCloseModal 同一原理：
+// 直接 append/remove DOM，state.modal 始终为 null，不触发任何全局重渲染
+function acShowModal(html) {
+  acDismissModal(); // 防重叠
+  const overlay = document.createElement('div');
+  overlay.id = 'ac-modal-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+}
+
+function acDismissModal() {
+  document.getElementById('ac-modal-overlay')?.remove();
+}
+
+// acCloseModal：关闭弹窗 + 刷新数据行
+function acCloseModal() {
+  acDismissModal();
+  if (_acActiveTable) acLoadRows();
 }
 
 // ============================================================
@@ -1043,6 +1066,7 @@ const PAGE_PERMS = {
   reports:    'reports',
   sharefiles: 'sharefiles',
   datacenter: 'datacenter',
+  appcenter:  null,          // 所有登录用户均可访问，无需额外权限
   dashboard:  { any: ['finance', 'bank'] },
 };
 
@@ -1146,6 +1170,7 @@ async function loadPage() {
       case 'bank': await loadBank(content, actions); break;
       case 'reports': await loadReports(content, actions); break;
       case 'datacenter': await loadDataCenter(content, actions); break;
+      case 'appcenter':  await loadAppCenter(content, actions); break;
       case 'bookmarks':  await loadBookmarks(content, actions); break;
       case 'users': await loadUsers(content, actions); break;
       case 'email':    await loadEmail(content, actions); break;
@@ -4061,6 +4086,9 @@ function openEmployeeModal(emp) {
         <div class="form-group"><label>邮箱</label><input id="e-email" type="email" value="${e.email||''}" placeholder="work@company.com"></div>
         <div class="form-group"><label>${e.id ? '新密码（留空不修改）' : '密码 *'}</label><input id="e-password" type="password" placeholder="${e.id ? '留空则不修改' : '请设置登录密码'}" autocomplete="new-password" value=""></div>
       </div>
+      <div class="form-row">
+        <div class="form-group"><label>工号 <span style="font-size:11px;color:var(--text3)">（留空则自动使用 ID）</span></label><input id="e-empid" value="${e.employee_id||''}" placeholder="如：EMP001、A2024"></div>
+      </div>
 
       <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:14px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border)">职位信息</div>
       <div class="form-row">
@@ -4120,6 +4148,7 @@ function openEmployeeModal(emp) {
       level:       comboboxVal('e-lvl'),
       is_admin:    isAdmin,
       permissions: JSON.stringify(newPerms),
+      employee_id: document.getElementById('e-empid')?.value.trim() || '',
     };
     if (password) body.password = password;
 
@@ -5626,9 +5655,18 @@ function _rptRenderConfigForm() {
   const src = _rptSourceMeta(_rptCfg.source);
   const fields = src ? src.fields : [];
 
-  const sourceOpts = _rptSources.map(s =>
+  // 数据源分组：内置、数据中心（dc_前缀）、应用中心（app_前缀）
+  const builtinSrcs = _rptSources.filter(s => !s.id.startsWith('dc_') && !s.id.startsWith('app_'));
+  const dcSrcs      = _rptSources.filter(s => s.id.startsWith('dc_'));
+  const plusSrcs    = _rptSources.filter(s => s.id.startsWith('app_'));
+  const mkOpts = list => list.map(s =>
     `<option value="${s.id}" ${_rptCfg.source===s.id?'selected':''}>${s.label}</option>`
   ).join('');
+  const sourceOpts = [
+    mkOpts(builtinSrcs),
+    dcSrcs.length   ? `<optgroup label="── 数据中心 ──">${mkOpts(dcSrcs)}</optgroup>`   : '',
+    plusSrcs.length ? `<optgroup label="── 应用中心 ──">${mkOpts(plusSrcs)}</optgroup>` : '',
+  ].join('');
 
   const fOpts = (extra='', filterFn=null) => {
     const list = filterFn ? fields.filter(filterFn) : fields;
@@ -6651,7 +6689,14 @@ async function loadDataCenter(content, actions) {
   try {
     const lastId = parseInt(localStorage.getItem(_DC_LAST_KEY));
     if (lastId && _dcTables.some(t => t.id === lastId)) {
-      dcSelectTable(lastId);
+      // 如果已有激活的表且是同一张表（例如弹窗关闭触发 loadPage），
+      // 保留现有排序/筛选状态，只刷新数据；否则走完整初始化
+      if (_dcActiveTable && _dcActiveTable.id === lastId) {
+        dcRenderSidebar(lastId);
+        await dcLoadContent();
+      } else {
+        dcSelectTable(lastId);
+      }
     }
   } catch(e) {}
 }
@@ -6744,6 +6789,7 @@ async function dcLoadContent() {
     <div id="dc-pagination" style="flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:4px 0"></div>`;
 
   document.getElementById('dc-search')?.addEventListener('keydown', e => { if(e.key==='Enter') dcSearch(); });
+  dcRenderFilterTags();   // 恢复筛选标签显示
   await dcLoadRows();
 }
 
@@ -7021,12 +7067,12 @@ function dcRenderTable() {
   const filterBtn = fid => {
     const active = activeFilterFields.has(fid);
     return `<span onclick="event.stopPropagation();dcOpenColFilter('${fid}')"
-      style="margin-left:3px;cursor:pointer;font-size:10px;opacity:${active?1:.4};color:${active?'var(--accent)':'inherit'}"
+      style="margin-right:3px;cursor:pointer;font-size:10px;opacity:${active?1:.4};color:${active?'var(--accent)':'inherit'}"
       title="筛选此列">▼</span>`;
   };
   const thead = `<tr>
-    <th style="${thStyle}" onclick="dcSetSort('id')">#${arrow('id')}${filterBtn('id')}</th>
-    ${fields.map(f=>`<th style="${thStyle}" onclick="dcSetSort('${f.id}')">${escHtml(f.name)}${arrow(f.id)}${filterBtn(f.id)}</th>`).join('')}
+    <th style="${thStyle}" onclick="dcSetSort('id')">${filterBtn('id')}#${arrow('id')}</th>
+    ${fields.map(f=>`<th style="${thStyle}" onclick="dcSetSort('${f.id}')">${filterBtn(f.id)}${escHtml(f.name)}${arrow(f.id)}</th>`).join('')}
     <th style="${thAct}">操作</th>
   </tr>`;
 
@@ -9696,6 +9742,7 @@ async function saLoadFeatures() {
       { label: '分析', items: [
         { id: 'reports',    icon: '📈', label: '报表中心' },
         { id: 'datacenter', icon: '🗄️', label: '数据中心' },
+        { id: 'appcenter',  icon: '🧩', label: '应用中心' },
       ]},
       { label: '系统', items: [
       ]},
@@ -14192,6 +14239,1957 @@ function dcDownloadSkeleton(tableId) {
 // ── 数据中心弹窗辅助（复用showModal但样式独立）────────────────────────────
 function dcShowModal(html) { showModal(html); }
 function dcCloseModal() { closeModal(); }
+
+function dcShowModal(html) { showModal(html); }
+function dcCloseModal() { closeModal(); }
+
+// ============================================================
+// 应用中心 (App Center)
+// ============================================================
+
+let _acView    = 'apps';   // 'apps' | 'db'  (管理员左侧选中项)
+let _acApps    = [];
+let _acTables  = [];
+let _acEditMode = false;
+let _acDragId  = null;
+let _acActiveTable = null; // 当前打开的数据表（db视图）
+let _acIframeApp   = null; // 当前 iframe 中的应用
+
+// ── 入口 ─────────────────────────────────────────────────────
+async function loadAppCenter(content, actions) {
+  _acEditMode = false;
+  _acIframeApp = null;
+  const isAdmin = !!state.user?.is_admin;
+
+  if (isAdmin) {
+    actions.innerHTML = `
+      <input id="ac-search" placeholder="🔍 搜索应用…" oninput="acFilter()"
+        style="padding:6px 12px;background:var(--bg1);border:1px solid var(--border);
+               border-radius:20px;color:var(--text);font-size:13px;width:200px;outline:none">`;
+  } else {
+    actions.innerHTML = `
+      <input id="ac-search" placeholder="🔍 搜索应用…" oninput="acFilter()"
+        style="padding:6px 12px;background:var(--bg1);border:1px solid var(--border);
+               border-radius:20px;color:var(--text);font-size:13px;width:200px;outline:none">`;
+  }
+
+  if (isAdmin) {
+    content.innerHTML = `
+      <div style="display:flex;gap:0;height:100%;min-height:500px">
+        <!-- 左侧导航 -->
+        <div id="ac-sidebar" style="width:180px;flex-shrink:0;background:var(--bg2);
+             border:1px solid var(--border);border-radius:10px;overflow-y:auto;padding:12px 0;margin-right:16px">
+          <div style="padding:0 14px 10px;font-size:11px;font-weight:600;color:var(--text3);
+                      letter-spacing:.05em;text-transform:uppercase">应用中心</div>
+          <div id="ac-nav-apps" onclick="acSetView('apps')"
+            class="ac-nav-item" style="padding:9px 14px;cursor:pointer;display:flex;align-items:center;
+            gap:8px;font-size:13px;border-radius:6px;margin:1px 6px;
+            background:${_acView==='apps'?'rgba(88,166,255,.15)':''}; color:${_acView==='apps'?'var(--accent)':'var(--text2)'}">
+            🧩 应用列表
+          </div>
+          <div id="ac-nav-db" onclick="acSetView('db')"
+            class="ac-nav-item" style="padding:9px 14px;cursor:pointer;display:flex;align-items:center;
+            gap:8px;font-size:13px;border-radius:6px;margin:1px 6px;
+            background:${_acView==='db'?'rgba(88,166,255,.15)':''}; color:${_acView==='db'?'var(--accent)':'var(--text2)'}">
+            🗄️ 数据库管理
+          </div>
+          <div id="ac-nav-groups" onclick="acSetView('groups')"
+            class="ac-nav-item" style="padding:9px 14px;cursor:pointer;display:flex;align-items:center;
+            gap:8px;font-size:13px;border-radius:6px;margin:1px 6px;
+            background:${_acView==='groups'?'rgba(88,166,255,.15)':''}; color:${_acView==='groups'?'var(--accent)':'var(--text2)'}">
+            👥 全局组管理
+          </div>
+        </div>
+        <!-- 右侧内容 -->
+        <div id="ac-main" style="flex:1;overflow:clip;display:flex;flex-direction:column;min-width:0"></div>
+      </div>`;
+    acRenderMain();
+  } else {
+    // 非管理员：直接显示应用列表
+    content.innerHTML = `<div id="ac-main" style="flex:1;overflow:clip;display:flex;flex-direction:column;min-width:0;height:100%"></div>`;
+    await acLoadApps();
+    acRenderAppsView();
+  }
+}
+
+function acSetView(v) {
+  _acView = v;
+  ['apps','db','groups'].forEach(id => {
+    const el = document.getElementById('ac-nav-' + id);
+    if (!el) return;
+    const active = id === v;
+    el.style.background = active ? 'rgba(88,166,255,.15)' : '';
+    el.style.color = active ? 'var(--accent)' : 'var(--text2)';
+  });
+  acRenderMain();
+}
+
+async function acRenderMain() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+  if (_acView === 'apps') {
+    await acLoadApps();
+    acRenderAppsView();
+  } else if (_acView === 'groups') {
+    await acLoadGroupsView();
+  } else {
+    await acLoadTables();
+    acRenderDbView();
+  }
+}
+
+// ── 应用列表 ─────────────────────────────────────────────────
+async function acLoadApps() {
+  const res = await api('GET', '/plus/apps');
+  _acApps = res.apps || [];
+}
+
+function acFilter() {
+  const kw = (document.getElementById('ac-search')?.value || '').toLowerCase();
+  document.querySelectorAll('.ac-app-card').forEach(el => {
+    const name = (el.dataset.name || '').toLowerCase();
+    const cat  = (el.dataset.cat  || '').toLowerCase();
+    el.style.display = (!kw || name.includes(kw) || cat.includes(kw)) ? '' : 'none';
+  });
+}
+
+function acRenderAppsView() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+  const isAdmin = !!state.user?.is_admin;
+
+  // 关闭 iframe（如果有）
+  _acIframeApp = null;
+
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;gap:0">
+      ${isAdmin ? `
+      <div style="flex-shrink:0;display:flex;gap:8px;justify-content:flex-end;padding-bottom:12px">
+        <button class="btn btn-sm" id="ac-edit-btn" onclick="acToggleEdit()">✏️ 编辑</button>
+        <button class="btn btn-primary btn-sm" onclick="acOpenAppModal(null)">＋ 添加应用</button>
+      </div>` : ''}
+      <div style="flex:1;overflow-y:auto">
+        <div id="ac-app-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:14px;padding:4px 2px"></div>
+        <div id="ac-app-empty" style="display:none;padding:60px;text-align:center;color:var(--text3)">
+          <div style="font-size:40px;margin-bottom:12px">🧩</div>
+          <div style="font-size:14px">暂无应用</div>
+        </div>
+      </div>
+    </div>`;
+  acRenderAppCards();
+}
+
+function acRenderAppCards() {
+  const grid  = document.getElementById('ac-app-grid');
+  const empty = document.getElementById('ac-app-empty');
+  if (!grid) return;
+
+  const kw = (document.getElementById('ac-search')?.value || '').toLowerCase();
+  let list = _acApps;
+  if (kw) list = list.filter(a =>
+    (a.name||'').toLowerCase().includes(kw) || (a.category||'').toLowerCase().includes(kw));
+
+  if (!list.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  grid.innerHTML = list.map(a => acCardHtml(a)).join('');
+}
+
+function acCardHtml(a) {
+  const icon = a.icon || '🧩';
+  const isAdmin = !!state.user?.is_admin;
+  return `<div class="ac-app-card" data-id="${a.id}" data-name="${escHtml(a.name)}" data-cat="${escHtml(a.category||'')}"
+    draggable="${_acEditMode && isAdmin}"
+    ondragstart="acDragStart(event,${a.id})"
+    ondragover="acDragOver(event,${a.id})"
+    ondrop="acDrop(event,${a.id})"
+    ondragend="acDragEnd()"
+    onclick="${_acEditMode ? '' : `acOpenApp(${a.id})`}"
+    style="position:relative;background:var(--bg2);border:1px solid var(--border);
+           border-radius:12px;padding:14px 10px 10px;text-align:center;
+           cursor:${_acEditMode ? 'grab' : 'pointer'};
+           transition:box-shadow .15s,transform .1s;user-select:none;
+           ${_acEditMode ? 'outline:1px dashed var(--border)' : ''}"
+    onmouseenter="if(!${_acEditMode})this.style.boxShadow='0 4px 16px rgba(0,0,0,.18)';this.style.transform='translateY(-2px)'"
+    onmouseleave="this.style.boxShadow='';this.style.transform=''">
+    <div style="font-size:32px;margin-bottom:6px;line-height:1">${escHtml(icon)}</div>
+    <div style="font-size:12px;color:var(--text);font-weight:500;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap;max-width:80px;margin:0 auto">${escHtml(a.name)}</div>
+    ${a.category ? `<div style="font-size:10px;color:var(--text3);margin-top:3px">${escHtml(a.category)}</div>` : ''}
+    ${_acEditMode && isAdmin ? `
+    <div style="position:absolute;top:4px;right:4px;display:flex;gap:2px">
+      <button onclick="event.stopPropagation();acOpenAppModal(${a.id})"
+        style="background:var(--bg3);border:none;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 5px;color:var(--text2)">✏️</button>
+      <button onclick="event.stopPropagation();acDeleteApp(${a.id})"
+        style="background:var(--bg3);border:none;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 5px;color:var(--red)">🗑</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function acToggleEdit() {
+  _acEditMode = !_acEditMode;
+  const btn = document.getElementById('ac-edit-btn');
+  if (btn) {
+    btn.textContent = _acEditMode ? '✓ 完成' : '✏️ 编辑';
+    btn.className = _acEditMode ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  }
+  acRenderAppCards();
+}
+
+// 打开应用（iframe 或新标签页）
+function acOpenApp(id) {
+  const app = _acApps.find(a => a.id === id);
+  if (!app || !app.url) return;
+
+  if (app.open_mode === 'tab') {
+    window.open(app.url, '_blank');
+    return;
+  }
+
+  // iframe 模式：在右侧主内容区展示
+  _acIframeApp = app;
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%">
+      <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding-bottom:10px">
+        <button class="btn btn-sm" onclick="acRenderAppsView()">← 返回</button>
+        <span style="font-size:14px;font-weight:600;color:var(--text)">${escHtml(app.icon||'🧩')} ${escHtml(app.name)}</span>
+        <a href="${escHtml(app.url)}" target="_blank" class="btn btn-sm" style="margin-left:auto">↗ 新窗口打开</a>
+      </div>
+      <iframe src="${escHtml(app.url)}"
+        style="flex:1;border:1px solid var(--border);border-radius:8px;background:#fff"
+        allowfullscreen sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-top-navigation"></iframe>
+    </div>`;
+}
+
+// 拖拽排序
+function acDragStart(e, id) {
+  _acDragId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => {
+    const el = document.querySelector(`.ac-app-card[data-id="${id}"]`);
+    if (el) el.style.opacity = '0.4';
+  }, 0);
+}
+function acDragOver(e, id) {
+  e.preventDefault();
+  document.querySelectorAll('.ac-app-card').forEach(el => el.style.outline = '');
+  const t = document.querySelector(`.ac-app-card[data-id="${id}"]`);
+  if (t && id !== _acDragId) t.style.outline = '2px solid var(--accent)';
+}
+function acDrop(e, toId) {
+  e.preventDefault();
+  const fromId = _acDragId;
+  if (!fromId || fromId === toId) return;
+  const fi = _acApps.findIndex(a => a.id === fromId);
+  const ti = _acApps.findIndex(a => a.id === toId);
+  if (fi < 0 || ti < 0) return;
+  const [moved] = _acApps.splice(fi, 1);
+  _acApps.splice(ti, 0, moved);
+  _acApps.forEach((a, i) => a.sort_order = i);
+  acRenderAppCards();
+  api('PUT', '/plus/apps/reorder', { orders: _acApps.map((a, i) => ({ id: a.id, order: i })) }).catch(() => {});
+}
+function acDragEnd() {
+  _acDragId = null;
+  document.querySelectorAll('.ac-app-card').forEach(el => {
+    el.style.opacity = '';
+    el.style.outline = '';
+  });
+}
+
+// 添加/编辑应用弹窗
+function acOpenAppModal(id) {
+  const a = id ? (_acApps.find(x => x.id === id) || {}) : {};
+  showModal(`<div class="modal">
+    <div class="modal-header">${id ? '编辑应用' : '添加应用'}<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-group"><label>名称 *</label>
+        <input id="ac-app-name" value="${escHtml(a.name||'')}" placeholder="应用名称"></div>
+      <div class="form-group"><label>URL *</label>
+        <input id="ac-app-url" value="${escHtml(a.url||'')}" placeholder="https://… 或 /web/xxx.html"></div>
+      <div class="form-group"><label>图标（emoji）</label>
+        <input id="ac-app-icon" value="${escHtml(a.icon||'')}" placeholder="🧩"></div>
+      <div class="form-group"><label>分类</label>
+        <input id="ac-app-cat" value="${escHtml(a.category||'')}" placeholder="如：报表、工具"></div>
+      <div class="form-group"><label>描述</label>
+        <input id="ac-app-remark" value="${escHtml(a.remark||'')}" placeholder="鼠标悬停时显示"></div>
+      <div class="form-group"><label>打开方式</label>
+        <select id="ac-app-mode">
+          <option value="iframe" ${(a.open_mode||'iframe')==='iframe'?'selected':''}>嵌入显示（iframe）</option>
+          <option value="tab"    ${a.open_mode==='tab'?'selected':''}>新标签页打开</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="acSaveApp(${id||0})">保存</button>
+    </div>
+  </div>`);
+}
+
+async function acSaveApp(id) {
+  const name   = document.getElementById('ac-app-name')?.value.trim();
+  const url    = document.getElementById('ac-app-url')?.value.trim();
+  const icon   = document.getElementById('ac-app-icon')?.value.trim();
+  const cat    = document.getElementById('ac-app-cat')?.value.trim();
+  const remark = document.getElementById('ac-app-remark')?.value.trim();
+  const mode   = document.getElementById('ac-app-mode')?.value || 'iframe';
+  if (!name) { alert('请填写应用名称'); return; }
+  if (!url)  { alert('请填写 URL'); return; }
+  const payload = { name, url, icon, category: cat, remark, open_mode: mode };
+  if (id) {
+    await api('PUT', `/plus/apps/${id}`, payload);
+  } else {
+    await api('POST', '/plus/apps', payload);
+  }
+  closeModal();
+  await acLoadApps();
+  acRenderAppCards();
+}
+
+async function acDeleteApp(id) {
+  if (!confirm('确认删除此应用？')) return;
+  await api('DELETE', `/plus/apps/${id}`);
+  _acApps = _acApps.filter(a => a.id !== id);
+  acRenderAppCards();
+}
+
+// ── 数据库管理视图 ────────────────────────────────────────────
+async function acLoadTables() {
+  const res = await api('GET', '/plus/tables');
+  _acTables = res.data || [];
+}
+
+function acRenderDbView() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;gap:12px">
+      <div style="flex-shrink:0;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-primary btn-sm" onclick="acNewTable()">⊞ 新建数据表</button>
+        <button class="btn btn-sm" onclick="acFromExcel()">📥 从Excel创建</button>
+      </div>
+      <div style="flex:1;overflow-y:auto">
+        <div id="ac-table-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:2px"></div>
+        <div id="ac-table-empty" style="display:none;padding:60px;text-align:center;color:var(--text3)">
+          <div style="font-size:40px;margin-bottom:12px">🗄️</div>
+          <div style="font-size:14px">暂无数据表，点击「新建数据表」开始</div>
+        </div>
+      </div>
+    </div>`;
+  acRenderTableCards();
+}
+
+function acRenderTableCards() {
+  const grid  = document.getElementById('ac-table-grid');
+  const empty = document.getElementById('ac-table-empty');
+  if (!grid) return;
+
+  if (!_acTables.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  grid.innerHTML = _acTables.map(t => `
+    <div onclick="acOpenTable('${escHtml(t.name)}')"
+      style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+             padding:16px;cursor:pointer;transition:box-shadow .15s,transform .1s;position:relative"
+      onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,.18)';this.style.transform='translateY(-2px)'"
+      onmouseleave="this.style.boxShadow='';this.style.transform=''">
+      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">🗄️ ${escHtml(t.name)}</div>
+      <div style="font-size:12px;color:var(--accent);margin-bottom:8px">${escHtml(t.label)}</div>
+      ${t.description ? `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">${escHtml(t.description)}</div>` : ''}
+      <div style="font-size:11px;color:var(--text3)">${t.fields?.length||0} 个字段 · ${t.row_count||0} 行</div>
+      <button onclick="event.stopPropagation();acDeleteTable('${escHtml(t.name)}')"
+        style="position:absolute;top:10px;right:10px;background:none;border:none;
+               color:var(--red);cursor:pointer;font-size:16px;opacity:.5;padding:2px 6px"
+        onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.5'">×</button>
+    </div>`).join('');
+}
+
+async function acDeleteTable(name) {
+  if (!confirm(`确认删除数据表「${name}」及其所有数据？此操作不可恢复！`)) return;
+  await api('DELETE', `/plus/tables/${name}`);
+  _acTables = _acTables.filter(t => t.name !== name);
+  acRenderTableCards();
+}
+
+// ── 新建数据表弹窗（复用数据中心相同交互）───────────────────
+function acNewTable() {
+  _acPendingFields = [{ name: '', type: 'text', required: false }];
+  acShowTableModal(null);
+}
+
+let _acPendingFields = [];
+
+function acShowTableModal(t) {
+  const isEdit = !!t;
+  if (isEdit) _acPendingFields = t.fields ? t.fields.map(f => ({ ...f })) : [];
+  acShowModal(`<div class="modal" style="max-width:700px;width:95vw">
+    <div class="modal-header">${isEdit ? '编辑表结构' : '新建数据表'}<span class="modal-close" onclick="acDismissModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>表名（英文，建表后不可修改）*</label>
+          <input id="ac-tbl-name" value="${escHtml(t?.name||'')}" ${isEdit?'readonly':''} placeholder="如：orders（小写字母、数字、下划线）"
+            style="${isEdit?'opacity:.6;cursor:not-allowed':''}" oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9_]/g,'')">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>显示名 *</label>
+          <input id="ac-tbl-label" value="${escHtml(t?.label||'')}" placeholder="如：订单记录">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>描述（可选）</label>
+        <input id="ac-tbl-desc" value="${escHtml(t?.description||'')}" placeholder="用途说明">
+      </div>
+      <div style="font-size:12px;font-weight:600;color:var(--text3);margin:12px 0 6px;text-transform:uppercase;letter-spacing:.05em">字段定义</div>
+      <div id="ac-fields-wrap"></div>
+      <button class="btn btn-sm" onclick="acAddField()" style="margin-top:8px">＋ 添加字段</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="${isEdit?'acCloseModal':'acDismissModal'}()">取消</button>
+      <button class="btn btn-primary" onclick="acSaveTable(${isEdit ? `'${t.name}'` : 'null'})">${isEdit ? '保存' : '创建'}</button>
+    </div>
+  </div>`);
+  acRenderFields();
+}
+
+function acRenderFields() {
+  const wrap = document.getElementById('ac-fields-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = _acPendingFields.map((f, i) => `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <input value="${escHtml(f.name||'')}" placeholder="字段名称"
+        oninput="_acPendingFields[${i}].name=this.value"
+        style="flex:2;padding:6px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+      <select onchange="_acPendingFields[${i}].type=this.value"
+        style="flex:1;padding:6px 8px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+        ${['text','number','date','datetime'].map(tp =>
+          `<option value="${tp}" ${f.type===tp?'selected':''}>${{text:'文本',number:'数字',date:'日期',datetime:'日期时间'}[tp]}</option>`
+        ).join('')}
+      </select>
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;white-space:nowrap">
+        <input type="checkbox" ${f.required?'checked':''} onchange="_acPendingFields[${i}].required=this.checked"> 必填
+      </label>
+      <button onclick="acRemoveField(${i})"
+        style="background:none;border:none;color:var(--red);cursor:pointer;font-size:18px;padding:0 4px;line-height:1">×</button>
+    </div>`).join('');
+}
+
+function acAddField() {
+  _acPendingFields.push({ name: '', type: 'text', required: false });
+  acRenderFields();
+}
+
+function acRemoveField(i) {
+  _acPendingFields.splice(i, 1);
+  acRenderFields();
+}
+
+async function acSaveTable(existingName) {
+  // Sync field values from DOM before saving
+  document.querySelectorAll('#ac-fields-wrap input[placeholder="字段名称"]').forEach((el, i) => {
+    if (_acPendingFields[i]) _acPendingFields[i].name = el.value;
+  });
+
+  const name  = document.getElementById('ac-tbl-name')?.value.trim();
+  const label = document.getElementById('ac-tbl-label')?.value.trim();
+  const desc  = document.getElementById('ac-tbl-desc')?.value.trim();
+  if (!existingName && !name) { alert('请输入表名'); return; }
+  if (!label) { alert('请输入显示名'); return; }
+  const fields = _acPendingFields.filter(f => f.name.trim());
+  if (!fields.length) { alert('至少需要一个字段'); return; }
+
+  try {
+    if (existingName) {
+      await api('PUT', `/plus/tables/${existingName}`, { label, description: desc, fields });
+      // 编辑表结构：关闭弹窗，刷新元数据，留在表详情页
+      acDismissModal();
+      await acLoadTables();
+      const updated = _acTables.find(x => x.name === existingName);
+      if (updated) _acActiveTable = updated;
+      acLoadRows();
+    } else {
+      await api('POST', '/plus/tables', { name, label, description: desc, fields });
+      // 新建表：关闭弹窗，回到数据库管理列表显示新表
+      acDismissModal();
+      await acLoadTables();
+      acRenderTableCards();
+    }
+  } catch(e) {
+    alert('保存失败: ' + (e.message || e));
+  }
+}
+
+// ── 从 Excel 创建表 ──────────────────────────────────────────
+function acFromExcel() {
+  showModal(`<div class="modal">
+    <div class="modal-header">从 Excel 创建数据表<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>选择 Excel 文件（.xlsx）</label>
+        <input type="file" id="ac-excel-file" accept=".xlsx" style="color:var(--text)">
+      </div>
+      <div style="font-size:12px;color:var(--text3)">第一行将作为字段名，自动推断数据类型</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="acExcelPreview()">下一步 →</button>
+    </div>
+  </div>`);
+}
+
+async function acExcelPreview() {
+  const fileInput = document.getElementById('ac-excel-file');
+  if (!fileInput?.files[0]) { alert('请选择文件'); return; }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  try {
+    const res = await fetch('/api/plus/tables/from-excel', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || '上传失败'); return; }
+    acShowExcelConfirm(data);
+  } catch(e) { alert('上传失败: ' + e.message); }
+}
+
+function acShowExcelConfirm(preview) {
+  let fields = preview.suggested_fields || [];
+  window._acExcelPendingFields = fields;   // 暂存，避免 onclick 嵌入 JSON 引起语法错误
+  window._acExcelPendingToken  = preview.token;
+  showModal(`<div class="modal" style="max-width:700px;width:95vw">
+    <div class="modal-header">确认字段定义<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>表名（英文）*</label>
+          <input id="ac-ex-name" placeholder="如：sales_orders" oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9_]/g,'')">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>显示名 *</label>
+          <input id="ac-ex-label" placeholder="如：销售订单">
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px">共 ${preview.total_rows} 行数据，以下为字段推断结果（可修改）：</div>
+      <div style="max-height:260px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3)">字段名</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3)">类型</th>
+            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3)">样本数据</th>
+          </tr></thead>
+          <tbody>${fields.map((f, i) => `<tr>
+            <td style="padding:6px 8px;border-bottom:1px solid var(--border)">${escHtml(f.name)}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid var(--border)">
+              <select id="ac-ex-type-${i}" style="background:var(--bg1);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:2px 6px;font-size:12px">
+                ${['text','number','date','datetime'].map(tp =>
+                  `<option value="${tp}" ${f.type===tp?'selected':''}>${{text:'文本',number:'数字',date:'日期',datetime:'日期时间'}[tp]}</option>`
+                ).join('')}
+              </select>
+            </td>
+            <td style="padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3);font-size:12px">
+              ${(preview.sample_rows||[]).map(r => escHtml(r[i]||'')).slice(0,2).join(' / ')}
+            </td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acFromExcel()">← 重新上传</button>
+      <button class="btn btn-primary" onclick="acExcelConfirm()">导入创建</button>
+    </div>
+  </div>`);
+}
+
+async function acExcelConfirm() {
+  const token     = window._acExcelPendingToken;
+  const origFields = window._acExcelPendingFields || [];
+  const name  = document.getElementById('ac-ex-name')?.value.trim();
+  const label = document.getElementById('ac-ex-label')?.value.trim();
+  if (!name)  { alert('请输入表名'); return; }
+  if (!label) { alert('请输入显示名'); return; }
+  // 读取用户修改后的类型
+  const fields = origFields.map((f, i) => ({
+    ...f,
+    type: document.getElementById(`ac-ex-type-${i}`)?.value || f.type
+  }));
+  try {
+    const res = await api('POST', '/plus/tables/from-excel/confirm', { token, name, label, fields });
+    closeModal();
+    alert(`创建成功！已导入 ${res.inserted} 行数据。`);
+    await acLoadTables();
+    acRenderTableCards();
+  } catch(e) { alert('导入失败: ' + (e.message || e)); }
+}
+
+// ── 数据表详情视图 ────────────────────────────────────────────
+async function acOpenTable(name) {
+  const t = _acTables.find(x => x.name === name);
+  if (!t) return;
+  _acActiveTable = t;
+
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;gap:10px">
+      <div style="flex-shrink:0;display:flex;align-items:center;gap:10px">
+        <button class="btn btn-sm" onclick="acSetView('db')">← 返回</button>
+        <span style="font-size:15px;font-weight:600;color:var(--text)">🗄️ ${escHtml(t.name)}</span>
+        <span style="font-size:12px;color:var(--accent)">${escHtml(t.label)}</span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-primary btn-sm" onclick="acAddRow()">＋ 新增</button>
+          <button class="btn btn-sm" onclick="acShowTemplates(_acActiveTable)">📄 模板</button>
+          <button class="btn btn-sm" onclick="acShowTableInfo(_acActiveTable)">📋 表信息</button>
+          ${state.user?.is_admin ? `<button class="btn btn-sm" onclick="acShowPerms(_acActiveTable)">🔐 权限</button>` : ''}
+          <button class="btn btn-sm" onclick="acShowTableModal(_acActiveTable)">⚙️ 表结构</button>
+        </div>
+      </div>
+      <div style="flex-shrink:0">
+        <div class="search-bar" style="max-width:340px">
+          <input class="search-input" id="ac-row-search" placeholder="搜索数据…">
+          <button class="btn" onclick="acLoadRows()">搜索</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow:auto;background:var(--bg2);border:1px solid var(--border);border-radius:10px">
+        <div id="ac-row-wrap" style="min-width:100%"></div>
+      </div>
+      <div id="ac-row-pagination" style="flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:4px 0"></div>
+    </div>`;
+
+  document.getElementById('ac-row-search')?.addEventListener('keydown', e => { if(e.key==='Enter') acLoadRows(); });
+  // 预加载用户缓存（用于显示创建人姓名），已缓存则跳过
+  if (!_acUserCache) {
+    api('GET', '/users/simple').then(u => { _acUserCache = u; acRenderRowTable(); }).catch(() => {});
+  }
+  await acLoadRows();
+}
+
+function acShowTableInfo(t) {
+  if (!t) return;
+  const fields = t.fields || [];
+  const host = window.location.origin;
+
+  // ── SQL DDL ──────────────────────────────────────────────────
+  const colDefs = [
+    '  `id`         INTEGER PRIMARY KEY AUTOINCREMENT',
+    ...fields.map(f => {
+      const sqlType = f.type === 'number' ? 'REAL' : 'TEXT';
+      const notNull = f.required ? ' NOT NULL DEFAULT \'\'' : '';
+      return `  \`${f.id}\`${' '.repeat(Math.max(1, 12 - f.id.length))}${sqlType}${notNull}  -- ${f.name}`;
+    }),
+    '  `created_by` INTEGER NOT NULL DEFAULT 0  -- 创建人用户ID',
+    '  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP',
+    '  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP',
+  ].join(',\n');
+  const ddl = `CREATE TABLE IF NOT EXISTS \`app_${t.name}\` (\n${colDefs}\n);`;
+
+  // ── 字段说明表格 ─────────────────────────────────────────────
+  const fieldRows = [
+    { id: 'id',         name: '#',        type: 'number',   required: true,  sys: true },
+    ...fields.map(f => ({ ...f, sys: false })),
+    { id: 'created_by', name: '创建人ID', type: 'number',   required: false, sys: true },
+    { id: 'created_at', name: '创建时间', type: 'datetime', required: false, sys: true },
+    { id: 'updated_at', name: '更新时间', type: 'datetime', required: false, sys: true },
+  ];
+  const typeLabel = { text: '文本', number: '数字', date: '日期', datetime: '日期时间' };
+
+  // ── API 说明 ─────────────────────────────────────────────────
+  const baseUrl = `${host}/api/plus/${t.name}`;
+  const exampleBody = '{' + fields.slice(0, 3).map(f =>
+    `"${f.id}": ${f.type === 'number' ? '0' : '"..."'}`).join(', ') + '}';
+
+  const apis = [
+    { method: 'POST',   color: '#58a6ff', path: `${baseUrl}/query`,        desc: '查询数据（分页/筛选/排序）',
+      body: `{\n  "q": "",          // 全文搜索\n  "sort_by": "id",  // 排序字段 id / ${fields[0]?.id||'f_0'} / ...\n  "sort_dir": "desc",\n  "page": 1,\n  "page_size": 50,\n  "filters": []     // 筛选条件（可选）\n}` },
+    { method: 'POST',   color: '#3fb950', path: `${baseUrl}/rows`,          desc: '新增一行',       body: exampleBody },
+    { method: 'PUT',    color: '#d29922', path: `${baseUrl}/rows/{id}`,     desc: '修改一行',       body: exampleBody },
+    { method: 'DELETE', color: '#f85149', path: `${baseUrl}/rows/{id}`,     desc: '删除一行',       body: '' },
+    { method: 'GET',    color: '#bc8cff', path: `${host}/api/plus/templates?table_name=${t.name}`, desc: '获取模板列表',
+      body: `// 返回示例：\n{\n  "templates": [\n    { "id": 1, "name": "月报", "file_type": "xlsx", "table_name": "${t.name}" },\n    { "id": 2, "name": "通用模板", "file_type": "html", "table_name": "" }\n  ]\n}` },
+    { method: 'POST',   color: '#bc8cff', path: `${baseUrl}/export?template_id={id}`, desc: '用模板导出数据（xlsx/docx）',
+      body: `{\n  "filters": [],       // 可选筛选\n  "sort_by": "id",\n  "sort_dir": "desc"\n}\n// template_id=0 → 默认样式 xlsx\n// 响应：二进制文件流（触发下载）` },
+    { method: 'GET',    color: '#bc8cff', path: `${host}/pages/appcenter/${t.name}?template={id}&token=...`, desc: 'HTML 模板网页预览',
+      body: `// 参数：\n//   template  模板 ID（必须是 html 类型）\n//   sort_by   排序字段（可选）\n//   sort_dir  asc/desc（可选）\n//   filters   URL编码的JSON筛选条件（可选）\n//   token     JWT Token\n// 浏览器直接渲染，支持 Ctrl+P 打印为 PDF` },
+    { method: 'GET',    color: '#e8b84b', path: `${host}/api/users/simple`, desc: '获取用户列表（id + 姓名）',
+      body: `// 所有登录用户可访问，用于将 created_by 映射为姓名\n// 返回：[{"id":1,"full_name":"张三"},{"id":2,"full_name":"李四"},...]\n// 示例：\nconst users = await fetch('${host}/api/users/simple', {\n  headers: { Authorization: 'Bearer ' + token }\n}).then(r => r.json());\nconst name = uid => users.find(u => u.id === uid)?.full_name || \`#\${uid}\`;` },
+    { method: 'GET',    color: '#e8b84b', path: `${host}/api/users/self`, desc: '获取当前登录用户完整信息',
+      body: `// 所有登录用户可访问，返回当前用户全部字段（除密码）\n// 返回示例：\n{\n  "id": 1,\n  "username": "zhangsan",\n  "full_name": "张三",\n  "email": "z@company.com",\n  "department": "技术部",\n  "position": "工程师",\n  "level": "P4",\n  "is_admin": false,\n  "permissions": "{\\"products\\":true}",\n  "employee_id": "EMP001",  // 未填时自动使用数据库 ID\n  "created_at": "2024-01-01 10:00:00"\n}\n// 示例：\nconst me = await fetch('${host}/api/users/self', {\n  headers: { Authorization: 'Bearer ' + token }\n}).then(r => r.json());` },
+  ];
+
+  acShowModal(`<div class="modal" style="max-width:780px;width:96vw;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      📋 表信息 — <span style="color:var(--accent);font-family:monospace">app_${escHtml(t.name)}</span>
+      <span class="modal-close" onclick="acCloseModal()">×</span>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:20px">
+
+      <!-- 基本信息 -->
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">基本信息</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+          <div style="background:var(--bg3);border-radius:6px;padding:10px 14px">
+            <span style="color:var(--text3)">物理表名</span><br>
+            <code style="color:var(--accent);font-size:13px">app_${escHtml(t.name)}</code>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:10px 14px">
+            <span style="color:var(--text3)">数据库文件</span><br>
+            <code style="color:var(--text);font-size:13px">data/db/plus.db</code>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:10px 14px">
+            <span style="color:var(--text3)">显示名</span><br>
+            <span style="color:var(--text);font-weight:500">${escHtml(t.label)}</span>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:10px 14px">
+            <span style="color:var(--text3)">字段数 / 行数</span><br>
+            <span style="color:var(--text);font-weight:500">${fields.length} 个字段 · ${t.row_count||0} 行</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 字段列表 -->
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">字段定义</div>
+        <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead>
+              <tr style="background:var(--bg3)">
+                <th style="padding:8px 12px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)">字段 ID</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)">显示名</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)">类型</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)">SQL 类型</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)">必填</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${fieldRows.map((f, i) => `
+              <tr style="background:${f.sys ? 'var(--bg3)' : (i%2===0?'':'var(--bg3)')}">
+                <td style="padding:7px 12px;border-bottom:1px solid var(--border)">
+                  <code style="color:${f.sys?'var(--text3)':'var(--accent)'};font-size:12px">${escHtml(f.id)}</code>
+                  ${f.sys ? '<span style="font-size:10px;color:var(--text3);margin-left:4px">系统</span>' : ''}
+                </td>
+                <td style="padding:7px 12px;border-bottom:1px solid var(--border);color:${f.sys?'var(--text3)':'var(--text)'}">${escHtml(f.name)}</td>
+                <td style="padding:7px 12px;border-bottom:1px solid var(--border);color:var(--text2)">${typeLabel[f.type]||f.type}</td>
+                <td style="padding:7px 12px;border-bottom:1px solid var(--border)">
+                  <code style="font-size:12px;color:var(--yellow)">${f.type==='number'?'REAL':'TEXT'}</code>
+                </td>
+                <td style="padding:7px 12px;border-bottom:1px solid var(--border);color:${f.required?'var(--green)':'var(--text3)'}">${f.required?'✓ 必填':'—'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.7">
+          💡 <code style="color:var(--text3)">created_by</code> 为系统自动记录的创建人用户 ID。
+          通过 <code style="color:var(--accent)">GET ${host}/api/users/simple</code>（需登录）可获取
+          <code style="color:var(--accent)">[{"id":1,"full_name":"张三"},...]</code> 用于映射显示姓名。
+        </div>
+      </div>
+
+      <!-- SQL DDL -->
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">SQL DDL</div>
+          <button onclick="acCopyText('ac-ddl-code','复制 DDL')" class="btn btn-sm" id="ac-copy-ddl">复制 DDL</button>
+        </div>
+        <pre id="ac-ddl-code" style="background:var(--bg1);border:1px solid var(--border);border-radius:8px;
+          padding:14px 16px;font-size:12px;line-height:1.7;color:var(--text);overflow-x:auto;margin:0;
+          font-family:'JetBrains Mono','Fira Code',monospace;white-space:pre">${escHtml(ddl)}</pre>
+      </div>
+
+      <!-- API 接口 -->
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">REST API（需 Authorization: Bearer &lt;token&gt;）</div>
+          <button onclick="acCopyText('ac-api-block','复制 API')" class="btn btn-sm" id="ac-copy-api">复制 API</button>
+        </div>
+        <pre id="ac-api-block" style="background:var(--bg1);border:1px solid var(--border);border-radius:8px;
+          padding:14px 16px;font-size:12px;line-height:1.9;color:var(--text);overflow-x:auto;margin:0;
+          font-family:'JetBrains Mono','Fira Code',monospace;white-space:pre">${escHtml(
+            apis.map(a => `${a.method.padEnd(7)} ${a.path}  # ${a.desc}`).join('\n')
+          )}</pre>
+      </div>
+
+      <!-- 完整 Prompt -->
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">AI Agent Prompt（一键复制给 AI）</div>
+          <button onclick="acCopyText('ac-prompt-code','复制 Prompt')" class="btn btn-sm" id="ac-copy-prompt">复制 Prompt</button>
+        </div>
+        <pre id="ac-prompt-code" style="background:var(--bg1);border:1px solid var(--border);border-radius:8px;
+          padding:14px 16px;font-size:12px;line-height:1.7;color:var(--text);overflow-x:auto;margin:0;
+          font-family:'JetBrains Mono','Fira Code',monospace;white-space:pre-wrap">${escHtml(acBuildPrompt(t, fields, apis, ddl))}</pre>
+      </div>
+
+    </div>
+    <div class="modal-footer" style="flex-shrink:0">
+      <button class="btn" onclick="acCloseModal()">关闭</button>
+    </div>
+  </div>`);
+}
+
+function acBuildPrompt(t, fields, apis, ddl) {
+  const fieldDesc = fields.map(f =>
+    `  - ${f.id} (${f.type==='number'?'REAL':'TEXT'})：${f.name}${f.required?' [必填]':''}`
+  ).join('\n');
+  const host = window.location.origin;
+  return `## 数据表：app_${t.name}（${t.label}）
+${t.description ? '\n描述：' + t.description + '\n' : ''}
+### 数据库
+- 文件：data/db/plus.db（SQLite）
+- 物理表名：app_${t.name}
+
+### 字段
+${fieldDesc}
+  - id         (INTEGER)：自增主键 [系统字段]
+  - created_by (INTEGER)：创建人用户 ID，0 = 未知 [系统字段，自动记录]
+  - created_at (DATETIME)：创建时间 [系统字段]
+  - updated_at (DATETIME)：更新时间 [系统字段]
+
+### 获取 Token（在 ERP 系统页面的浏览器控制台执行）
+  erpToken = localStorage.getItem('erp_token') || '';
+
+### REST API（Base URL: ${host}/api/plus/${t.name}）
+所有请求需携带 Header：Authorization: Bearer <token>
+
+1. 查询数据
+   POST /query
+   Body: { "q": "", "sort_by": "id", "sort_dir": "desc", "page": 1, "page_size": 50 }
+   返回: { "data": [...], "total": N, "fields": [...] }
+
+2. 新增一行（系统自动记录 created_by = 当前登录用户 ID）
+   POST /rows
+   Body: { ${fields.slice(0,3).map(f=>`"${f.id}": ...`).join(', ')} }
+   返回: { "id": N, "ok": true }
+
+3. 修改一行
+   PUT /rows/{id}
+   Body: { ${fields.slice(0,3).map(f=>`"${f.id}": ...`).join(', ')} }
+   返回: { "ok": true }
+
+4. 删除一行
+   DELETE /rows/{id}
+   返回: { "ok": true }
+
+### 用户信息接口（所有登录用户可访问）
+
+5. 获取用户列表（将 created_by 映射为姓名）
+   GET ${host}/api/users/simple
+   返回: [{ "id": 1, "full_name": "张三" }, ...]
+
+   JS 示例：
+   const users = await fetch('${host}/api/users/simple', {
+     headers: { Authorization: 'Bearer ' + erpToken }
+   }).then(r => r.json());
+   const userName = uid => users.find(u => u.id === uid)?.full_name || \`#\${uid}\`;
+   // 使用：userName(row.created_by)  →  "张三"
+
+6. 获取当前登录用户完整信息（除密码）
+   GET ${host}/api/users/self
+   返回: {
+     id, username, full_name, email, department, position, level,
+     is_admin, permissions, employee_id,  // employee_id 未填时自动为数据库 ID
+     created_at
+   }
+
+   JS 示例：
+   const me = await fetch('${host}/api/users/self', {
+     headers: { Authorization: 'Bearer ' + erpToken }
+   }).then(r => r.json());
+   // me.full_name → "张三"
+   // me.employee_id → "EMP001"（或 "1"）
+   // me.department → "技术部"
+   // JSON.parse(me.permissions) → {"products": true, ...}
+
+### 模板与导出 API
+
+7. 获取模板列表（含通用模板 + 此表专属模板）
+   GET ${host}/api/plus/templates?table_name=${t.name}
+   返回: { "templates": [{ "id": N, "name": "...", "file_type": "xlsx|docx|html" }] }
+
+8. 用模板导出数据（xlsx/docx → 触发文件下载）
+   POST ${host}/api/plus/${t.name}/export?template_id={模板ID}
+   Body（可选）: { "filters": [], "sort_by": "id", "sort_dir": "desc" }
+   - template_id=0 → 使用默认样式导出 xlsx
+
+9. HTML 模板网页预览
+   GET ${host}/pages/appcenter/${t.name}?template={模板ID}&token=<token>
+
+### SQL DDL
+${ddl}`;
+}
+
+function acCopyText(elementId, btnLabel) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  const text = el.textContent || el.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    // find the button that triggered this and show feedback
+    document.querySelectorAll('.modal button').forEach(btn => {
+      if (btn.textContent.includes(btnLabel.replace('复制 ', ''))) {
+        const orig = btn.textContent;
+        btn.textContent = '✓ 已复制';
+        btn.style.color = 'var(--green)';
+        setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+      }
+    });
+  }).catch(() => {
+    // fallback
+    const range = document.createRange();
+    range.selectNode(el);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    document.execCommand('copy');
+    window.getSelection().removeAllRanges();
+  });
+}
+
+// ── 权限管理 ─────────────────────────────────────────────────
+let _acPermData  = null;
+let _acUserCache = null;
+let _acDeptCache = null;  // 部门列表缓存
+let _acGroupCache = null; // 全局组列表缓存
+
+async function acShowPerms(t) {
+  if (!t) return;
+  const [permRes, usersRes, deptRes, groupRes] = await Promise.all([
+    api('GET', `/plus/${t.name}/perms`),
+    _acUserCache  ? Promise.resolve(_acUserCache)  : api('GET', '/users/simple').then(u => { _acUserCache = u; return u; }),
+    _acDeptCache  ? Promise.resolve(_acDeptCache)  : api('GET', '/share/departments').then(r => { _acDeptCache = r.departments||[]; return _acDeptCache; }).catch(()=>[]),
+    _acGroupCache ? Promise.resolve(_acGroupCache) : api('GET', '/plus/groups').then(r => { _acGroupCache = r.groups||[]; return _acGroupCache; }),
+  ]);
+  _acPermData = permRes;
+  if (!Array.isArray(_acUserCache)) _acUserCache = usersRes;
+  acRenderPermsModal(t);
+}
+
+async function acRefreshPerms(t) {
+  const res = await api('GET', `/plus/${t.name}/perms`);
+  _acPermData = res;
+  acRenderPermsModal(t);
+}
+
+// 权限矩阵行渲染辅助
+function acPermRow(label, labelStyle, perm, idPrefix, editable) {
+  const chk = (val, name) => editable
+    ? `<input type="checkbox" id="${idPrefix}-${name}" ${val?'checked':''} style="width:16px;height:16px;cursor:pointer">`
+    : `<span style="color:${val?'var(--green)':'var(--text3)'};font-size:16px">${val?'✓':'—'}</span>`;
+  return `<tr style="${idPrefix.startsWith('acp-sup')?'background:rgba(88,166,255,.06)':''}">
+    <td style="padding:10px 14px;color:${labelStyle};font-weight:${editable?'500':'600'}">${label}</td>
+    <td style="padding:10px 14px;text-align:center">${chk(perm.user_read_all,  'user_read_all')}</td>
+    <td style="padding:10px 14px;text-align:center">${chk(perm.user_read_own,  'user_read_own')}</td>
+    <td style="padding:10px 14px;text-align:center">${chk(perm.user_write,     'user_write')}</td>
+    <td style="padding:10px 14px;text-align:center">${chk(perm.user_edit_own,  'user_edit_own')}</td>
+    <td style="padding:10px 14px;text-align:center">${chk(perm.user_edit_all,  'user_edit_all')}</td>
+  </tr>`;
+}
+
+function acPermReadRow(label, perm) {
+  const fixed = {user_read_all:1,user_read_own:1,user_write:1,user_edit_own:1,user_edit_all:1};
+  return acPermRow(label, 'var(--accent)', fixed, 'acp-sup-fixed', false);
+}
+
+function acRenderPermsModal(t) {
+  const d = _acPermData || {};
+  const p = d.perm || {};
+  const sups   = d.supervisors  || [];
+  const depts  = d.dept_perms   || [];
+  const groups = d.group_perms  || [];
+  const users  = _acUserCache   || [];
+  const allDepts  = _acDeptCache  || [];
+  const allGroups = _acGroupCache || [];
+
+  const userName = uid => { const u = users.find(x=>x.id===Number(uid)); return u?(u.full_name||`#${uid}`):`#${uid}`; };
+  const thStyle  = `padding:8px 10px;text-align:center;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border);font-size:11px`;
+  const thLabel  = `padding:8px 14px;text-align:left;color:var(--text3);font-weight:600;border-bottom:1px solid var(--border);font-size:11px;min-width:120px`;
+  const sep      = `<div style="border-top:1px solid var(--border);margin:2px 0"></div>`;
+  const sectionTitle = (icon, text, btn='') =>
+    `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+       <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em">${icon} ${text}</div>
+       ${btn}
+     </div>`;
+  const addBtn = (label, onclick) =>
+    `<button onclick="${onclick}" style="background:var(--accent);border:none;border-radius:5px;color:#fff;font-size:12px;padding:4px 12px;cursor:pointer">${label}</button>`;
+  const removeBtn = (label, onclick) =>
+    `<button onclick="${onclick}" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--red);font-size:12px;padding:3px 8px;cursor:pointer">${label}</button>`;
+
+  // 权限矩阵表头
+  const matrixHead = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="background:var(--bg3)">
+      <th style="${thLabel}">角色</th>
+      <th style="${thStyle}">浏览所有</th>
+      <th style="${thStyle}">浏览自己</th>
+      <th style="${thStyle}">添加记录</th>
+      <th style="${thStyle}">改/删自己</th>
+      <th style="${thStyle}">改/删所有</th>
+    </tr></thead><tbody>`;
+  const matrixFoot = `</tbody></table>`;
+
+  // ── 主管列表 ──
+  const supList = sups.length
+    ? sups.map(s=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;background:var(--bg3);border-radius:6px;margin-bottom:4px">
+        <span style="font-size:13px;color:var(--text);flex:1">👤 ${escHtml(userName(s.user_id))}</span>
+        ${removeBtn('移除', `acDelSupervisor(${s.user_id})`)}
+      </div>`).join('')
+    : `<div style="padding:10px 12px;color:var(--text3);font-size:13px">暂无主管用户</div>`;
+
+  // ── 组规则列表 ──
+  const groupList = groups.length
+    ? groups.map(g=>`<div style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg3)">
+          <span style="font-size:13px;font-weight:500;color:var(--text);flex:1">👥 ${escHtml(g.group_name)}</span>
+          ${removeBtn('移除', `acDelGroupPerm(${g.id})`)}
+        </div>
+        ${matrixHead}
+          ${acPermRow(g.group_name,'var(--text)',g.perm,`acp-g-${g.id}`,false)}
+        ${matrixFoot}
+      </div>`).join('')
+    : `<div style="padding:10px 12px;color:var(--text3);font-size:13px">暂无组规则，可添加全局组并配置权限</div>`;
+
+  // ── 部门规则列表 ──
+  const deptList = depts.length
+    ? depts.map(d=>`<div style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg3)">
+          <span style="font-size:13px;font-weight:500;color:var(--text);flex:1">🏢 ${escHtml(d.department)}</span>
+          ${removeBtn('删除', `acDelDeptPerm(${d.id})`)}
+        </div>
+        ${matrixHead}
+          ${acPermRow(d.department,'var(--text)',d.perm,`acp-dept-${d.id}`,false)}
+        ${matrixFoot}
+      </div>`).join('')
+    : `<div style="padding:10px 12px;color:var(--text3);font-size:13px">暂无部门规则，可按部门配置不同权限</div>`;
+
+  acShowModal(`<div class="modal" style="max-width:680px;width:96vw;max-height:92vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      🔐 权限管理 — <span style="color:var(--accent);font-size:13px">${escHtml(t.label||t.name)}</span>
+      <span class="modal-close" onclick="acCloseModal()">×</span>
+    </div>
+    <div class="modal-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:18px">
+
+      <!-- 优先级说明 -->
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 14px;font-size:12px;color:var(--text3);line-height:1.8">
+        权限优先级（从高到低）：
+        <strong style="color:var(--accent)">管理员</strong> →
+        <strong style="color:var(--accent)">主管</strong> →
+        <strong style="color:var(--accent)">组规则</strong> →
+        <strong style="color:var(--accent)">部门规则</strong> →
+        <strong style="color:var(--accent)">登录用户默认</strong>
+      </div>
+
+      <!-- 主管 -->
+      <div>
+        ${sectionTitle('👤','主管用户（对此表全权，优先级最高）', addBtn('＋ 添加主管','acOpenAddSupervisor()'))}
+        <div id="acp-sup-list">${supList}</div>
+      </div>
+
+      ${sep}
+
+      <!-- 组规则 -->
+      <div>
+        ${sectionTitle('👥','组规则', addBtn('＋ 添加组规则','acOpenAddGroupPerm()'))}
+        <div id="acp-group-list">${groupList}</div>
+      </div>
+
+      ${sep}
+
+      <!-- 部门规则 -->
+      <div>
+        ${sectionTitle('🏢','部门规则', addBtn('＋ 添加部门规则','acOpenAddDeptPerm()'))}
+        <div id="acp-dept-list">${deptList}</div>
+      </div>
+
+      ${sep}
+
+      <!-- 登录用户默认 -->
+      <div>
+        ${sectionTitle('👤','登录用户默认（未匹配组/部门时生效）')}
+        ${matrixHead}
+          ${acPermRow('登录用户', 'var(--text)', p, 'acp-def', true)}
+          <tr style="background:rgba(88,166,255,.06)">
+            <td style="padding:10px 14px;color:var(--accent);font-weight:600">主管用户</td>
+            ${['','','','',''].map(()=>`<td style="padding:10px 14px;text-align:center"><span style="color:var(--green);font-size:16px" title="固定全权">✓</span></td>`).join('')}
+          </tr>
+        ${matrixFoot}
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">
+          💡 「改/删所有记录」给登录用户开启后，所有未匹配到组/部门规则的用户都可操作他人数据，请谨慎开启。
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer" style="flex-shrink:0">
+      <button class="btn" onclick="acCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="acSavePerms('${escHtml(t.name)}')">保存登录用户默认权限</button>
+    </div>
+  </div>`);
+}
+
+async function acSavePerms(tname) {
+  const perm = {
+    user_read_all: document.getElementById('acp-def-user_read_all')?.checked  ? 1 : 0,
+    user_read_own: document.getElementById('acp-def-user_read_own')?.checked  ? 1 : 0,
+    user_write:    document.getElementById('acp-def-user_write')?.checked     ? 1 : 0,
+    user_edit_own: document.getElementById('acp-def-user_edit_own')?.checked  ? 1 : 0,
+    user_edit_all: document.getElementById('acp-def-user_edit_all')?.checked  ? 1 : 0,
+  };
+  await api('PUT', `/plus/${tname}/perms`, perm);
+  if (_acPermData) _acPermData.perm = perm;
+  acCloseModal();
+}
+
+// ── 主管 CRUD ─────────────────────────────────────────────────
+function acOpenAddSupervisor() {
+  const t = _acActiveTable;
+  if (!t) return;
+  const users = _acUserCache || [];
+  const existing = new Set((_acPermData?.supervisors || []).map(s => Number(s.user_id)));
+  const available = users.filter(u => !existing.has(u.id));
+  acShowModal(`<div class="modal" style="max-width:420px;width:95vw">
+    <div class="modal-header">添加主管<span class="modal-close" onclick="acShowPerms(_acActiveTable)">×</span></div>
+    <div class="modal-body">
+      <div class="form-group"><label>选择用户</label>
+        <select id="acp-new-sup" style="width:100%;padding:8px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <option value="">-- 请选择 --</option>
+          ${available.map(u=>`<option value="${u.id}">${escHtml(u.full_name||`#${u.id}`)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acShowPerms(_acActiveTable)">取消</button>
+      <button class="btn btn-primary" onclick="acDoAddSupervisor('${escHtml(t.name)}')">添加</button>
+    </div>
+  </div>`);
+}
+async function acDoAddSupervisor(tname) {
+  const uid = parseInt(document.getElementById('acp-new-sup')?.value);
+  if (!uid) { alert('请选择用户'); return; }
+  await api('POST', `/plus/${tname}/supervisors`, { user_id: uid });
+  await acRefreshPerms(_acActiveTable);
+}
+async function acDelSupervisor(uid) {
+  const t = _acActiveTable;
+  if (!t || !confirm('确认移除该主管？')) return;
+  await api('DELETE', `/plus/${t.name}/supervisors/${uid}`);
+  await acRefreshPerms(t);
+}
+
+// ── 部门规则 CRUD ─────────────────────────────────────────────
+function acOpenAddDeptPerm() {
+  const t = _acActiveTable;
+  if (!t) return;
+  const allDepts = _acDeptCache || [];
+  const existing = new Set((_acPermData?.dept_perms||[]).map(d=>d.department));
+  const available = allDepts.filter(d => !existing.has(d));
+  const defaultP = {user_read_all:1,user_read_own:1,user_write:1,user_edit_own:1,user_edit_all:0};
+  const chk = (val,name) => `<input type="checkbox" id="acp-new-dept-${name}" ${val?'checked':''} style="width:15px;height:15px;cursor:pointer">`;
+  acShowModal(`<div class="modal" style="max-width:520px;width:95vw">
+    <div class="modal-header">添加部门规则<span class="modal-close" onclick="acShowPerms(_acActiveTable)">×</span></div>
+    <div class="modal-body">
+      <div class="form-group"><label>部门</label>
+        <select id="acp-new-dept-sel" style="width:100%;padding:8px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <option value="">-- 请选择 --</option>
+          ${available.map(d=>`<option value="${escHtml(d)}">${escHtml(d)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px">权限设置：</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:var(--bg3)">
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">浏览所有</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">浏览自己</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">添加记录</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">改/删自己</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">改/删所有</th>
+        </tr></thead>
+        <tbody><tr>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_read_all,'user_read_all')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_read_own,'user_read_own')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_write,'user_write')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_edit_own,'user_edit_own')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_edit_all,'user_edit_all')}</td>
+        </tr></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acShowPerms(_acActiveTable)">取消</button>
+      <button class="btn btn-primary" onclick="acDoAddDeptPerm('${escHtml(t.name)}')">添加</button>
+    </div>
+  </div>`);
+}
+async function acDoAddDeptPerm(tname) {
+  const dept = document.getElementById('acp-new-dept-sel')?.value;
+  if (!dept) { alert('请选择部门'); return; }
+  const perm = {
+    user_read_all: document.getElementById('acp-new-dept-user_read_all')?.checked ? 1:0,
+    user_read_own: document.getElementById('acp-new-dept-user_read_own')?.checked ? 1:0,
+    user_write:    document.getElementById('acp-new-dept-user_write')?.checked    ? 1:0,
+    user_edit_own: document.getElementById('acp-new-dept-user_edit_own')?.checked ? 1:0,
+    user_edit_all: document.getElementById('acp-new-dept-user_edit_all')?.checked ? 1:0,
+  };
+  await api('POST', `/plus/${tname}/dept-perms`, { department: dept, perm });
+  await acRefreshPerms(_acActiveTable);
+}
+async function acDelDeptPerm(id) {
+  const t = _acActiveTable;
+  if (!t || !confirm('确认删除该部门规则？')) return;
+  await api('DELETE', `/plus/${t.name}/dept-perms/${id}`);
+  await acRefreshPerms(t);
+}
+
+// ── 组规则 CRUD ───────────────────────────────────────────────
+function acOpenAddGroupPerm() {
+  const t = _acActiveTable;
+  if (!t) return;
+  const allGroups = _acGroupCache || [];
+  const existing  = new Set((_acPermData?.group_perms||[]).map(g=>g.group_id));
+  const available = allGroups.filter(g => !existing.has(g.id));
+  const defaultP  = {user_read_all:1,user_read_own:1,user_write:1,user_edit_own:1,user_edit_all:0};
+  const chk = (val,name) => `<input type="checkbox" id="acp-new-grp-${name}" ${val?'checked':''} style="width:15px;height:15px;cursor:pointer">`;
+  acShowModal(`<div class="modal" style="max-width:520px;width:95vw">
+    <div class="modal-header">添加组规则<span class="modal-close" onclick="acShowPerms(_acActiveTable)">×</span></div>
+    <div class="modal-body">
+      <div class="form-group"><label>全局组</label>
+        <select id="acp-new-grp-sel" style="width:100%;padding:8px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <option value="">-- 请选择 --</option>
+          ${available.map(g=>`<option value="${g.id}">${escHtml(g.name)}（${g.member_count}人）</option>`).join('')}
+        </select>
+        ${available.length===0 ? `<div style="margin-top:6px;font-size:12px;color:var(--text3)">暂无可用的全局组，请先在左侧「全局组」菜单创建。</div>` : ''}
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px">权限设置：</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:var(--bg3)">
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">浏览所有</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">浏览自己</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">添加记录</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">改/删自己</th>
+          <th style="padding:7px 10px;text-align:center;color:var(--text3);font-size:11px;border-bottom:1px solid var(--border)">改/删所有</th>
+        </tr></thead>
+        <tbody><tr>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_read_all,'user_read_all')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_read_own,'user_read_own')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_write,'user_write')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_edit_own,'user_edit_own')}</td>
+          <td style="padding:10px;text-align:center">${chk(defaultP.user_edit_all,'user_edit_all')}</td>
+        </tr></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acShowPerms(_acActiveTable)">取消</button>
+      <button class="btn btn-primary" onclick="acDoAddGroupPerm('${escHtml(t.name)}')">添加</button>
+    </div>
+  </div>`);
+}
+async function acDoAddGroupPerm(tname) {
+  const gid = parseInt(document.getElementById('acp-new-grp-sel')?.value);
+  if (!gid) { alert('请选择全局组'); return; }
+  const perm = {
+    user_read_all: document.getElementById('acp-new-grp-user_read_all')?.checked ? 1:0,
+    user_read_own: document.getElementById('acp-new-grp-user_read_own')?.checked ? 1:0,
+    user_write:    document.getElementById('acp-new-grp-user_write')?.checked    ? 1:0,
+    user_edit_own: document.getElementById('acp-new-grp-user_edit_own')?.checked ? 1:0,
+    user_edit_all: document.getElementById('acp-new-grp-user_edit_all')?.checked ? 1:0,
+  };
+  await api('POST', `/plus/${tname}/group-perms`, { group_id: gid, perm });
+  await acRefreshPerms(_acActiveTable);
+}
+async function acDelGroupPerm(id) {
+  const t = _acActiveTable;
+  if (!t || !confirm('确认移除该组规则？')) return;
+  await api('DELETE', `/plus/${t.name}/group-perms/${id}`);
+  await acRefreshPerms(t);
+}
+
+// ── 全局组管理视图 ────────────────────────────────────────────
+async function acLoadGroupsView() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+  const res = await api('GET', '/plus/groups');
+  _acGroupCache = res.groups || [];
+  acRenderGroupsView();
+}
+
+function acRenderGroupsView() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+  const groups = _acGroupCache || [];
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;gap:12px">
+      <div style="flex-shrink:0;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-primary btn-sm" onclick="acNewGroup()">＋ 新建全局组</button>
+      </div>
+      <div style="flex:1;overflow-y:auto">
+        <div id="ac-groups-list">
+          ${groups.length ? groups.map(g => acGroupCard(g)).join('') :
+            `<div style="padding:60px;text-align:center;color:var(--text3)">
+               <div style="font-size:36px;margin-bottom:10px">👥</div>
+               <div>暂无全局组，点击「新建全局组」创建</div>
+             </div>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+function acGroupCard(g) {
+  return `<div id="ac-group-card-${g.id}" style="background:var(--bg2);border:1px solid var(--border);
+    border-radius:10px;padding:16px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:15px;font-weight:600;color:var(--text)">👥 ${escHtml(g.name)}</span>
+      <span style="font-size:12px;color:var(--text3)">${g.member_count} 名成员</span>
+      <div style="margin-left:auto;display:flex;gap:6px">
+        <button onclick="acOpenGroupMembers(${g.id},'${escHtml(g.name)}')" class="btn btn-sm">管理成员</button>
+        <button onclick="acDeleteGroup(${g.id},'${escHtml(g.name)}')"
+          style="background:none;border:1px solid var(--border);border-radius:5px;color:var(--red);
+                 font-size:12px;padding:4px 10px;cursor:pointer">删除</button>
+      </div>
+    </div>
+    <div id="ac-group-members-${g.id}" style="display:none"></div>
+  </div>`;
+}
+
+function acNewGroup() {
+  showModal(`<div class="modal" style="max-width:400px;width:95vw">
+    <div class="modal-header">新建全局组<span class="modal-close" onclick="closeModal()">×</span></div>
+    <div class="modal-body">
+      <div class="form-group"><label>组名 *</label>
+        <input id="ac-new-group-name" placeholder="如：报销审核组、项目A成员">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="acDoCreateGroup()">创建</button>
+    </div>
+  </div>`);
+}
+
+async function acDoCreateGroup() {
+  const name = document.getElementById('ac-new-group-name')?.value.trim();
+  if (!name) { alert('请输入组名'); return; }
+  await api('POST', '/plus/groups', { name });
+  closeModal();
+  _acGroupCache = null; // 清缓存
+  await acLoadGroupsView();
+}
+
+async function acDeleteGroup(id, name) {
+  if (!confirm(`确认删除全局组「${name}」？相关的表级权限配置也会一并删除。`)) return;
+  await api('DELETE', `/plus/groups/${id}`);
+  _acGroupCache = null;
+  await acLoadGroupsView();
+}
+
+async function acOpenGroupMembers(gid, gname) {
+  const res = await api('GET', `/plus/groups/${gid}/members`);
+  const memberIds = new Set(res.members || []);
+  const users = _acUserCache || (await api('GET', '/users/simple').then(u => { _acUserCache = u; return u; }));
+  const members  = users.filter(u => memberIds.has(u.id));
+  const nonMembers = users.filter(u => !memberIds.has(u.id));
+  const userName = u => escHtml(u.full_name || `#${u.id}`);
+
+  // 用独立 overlay，不走全局 showModal（避免触发 render/loadPage）
+  document.getElementById('ac-group-member-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'ac-group-member-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal" style="max-width:500px;width:95vw;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      👥 管理成员 — <span style="color:var(--accent)">${escHtml(gname)}</span>
+      <span class="modal-close" onclick="document.getElementById('ac-group-member-overlay')?.remove()">×</span>
+    </div>
+    <div class="modal-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+
+      <!-- 当前成员 -->
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">
+          当前成员（${members.length}人）
+        </div>
+        ${members.length
+          ? members.map(u=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;
+              background:var(--bg3);border-radius:6px;margin-bottom:4px">
+              <span style="flex:1;font-size:13px;color:var(--text)">👤 ${userName(u)}</span>
+              <button onclick="acRemoveGroupMember(${gid},${u.id},'${escHtml(gname)}')"
+                style="background:none;border:1px solid var(--border);border-radius:4px;
+                       color:var(--red);font-size:12px;padding:3px 8px;cursor:pointer">移除</button>
+            </div>`).join('')
+          : `<div style="color:var(--text3);font-size:13px;padding:8px 0">暂无成员</div>`}
+      </div>
+
+      <!-- 添加成员 -->
+      ${nonMembers.length ? `
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">
+          添加成员
+        </div>
+        <div style="display:flex;gap:8px">
+          <select id="ac-add-member-sel" style="flex:1;padding:7px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+            <option value="">-- 选择用户 --</option>
+            ${nonMembers.map(u=>`<option value="${u.id}">${userName(u)}</option>`).join('')}
+          </select>
+          <button onclick="acAddGroupMember(${gid},'${escHtml(gname)}')" class="btn btn-primary btn-sm">添加</button>
+        </div>
+      </div>` : '<div style="color:var(--text3);font-size:13px">所有用户已在组内</div>'}
+
+    </div>
+    <div class="modal-footer" style="flex-shrink:0">
+      <button class="btn" onclick="document.getElementById('ac-group-member-overlay')?.remove()">关闭</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function acOpenGroupMembers(gid, gname) {
+  const res = await api('GET', `/plus/groups/${gid}/members`);
+  const memberIds = new Set(res.members || []);
+  const users = _acUserCache || (await api('GET', '/users/simple').then(u => { _acUserCache = u; return u; }));
+  const members    = users.filter(u => memberIds.has(u.id));
+  const nonMembers = users.filter(u => !memberIds.has(u.id));
+  const userName   = u => escHtml(u.full_name || `#${u.id}`);
+
+  const memberListHTML = () => members.length
+    ? members.map(u => `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;
+        background:var(--bg3);border-radius:6px;margin-bottom:4px">
+        <span style="flex:1;font-size:13px;color:var(--text)">👤 ${userName(u)}</span>
+        <button onclick="acRemoveGroupMember(${gid},${u.id},'${escHtml(gname)}')"
+          style="background:none;border:1px solid var(--border);border-radius:4px;
+                 color:var(--red);font-size:12px;padding:3px 8px;cursor:pointer">移除</button>
+      </div>`).join('')
+    : `<div style="color:var(--text3);font-size:13px;padding:8px 0">暂无成员</div>`;
+
+  const addAreaHTML = () => nonMembers.length
+    ? `<div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">添加成员</div>
+        <div style="display:flex;gap:8px">
+          <select id="ac-add-member-sel" style="flex:1;padding:7px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+            <option value="">-- 选择用户 --</option>
+            ${nonMembers.map(u => `<option value="${u.id}">${userName(u)}</option>`).join('')}
+          </select>
+          <button onclick="acAddGroupMember(${gid},'${escHtml(gname)}')" class="btn btn-primary btn-sm">添加</button>
+        </div>
+      </div>`
+    : `<div style="color:var(--text3);font-size:13px">所有用户已在组内</div>`;
+
+  // 关闭时刷新组列表（不在操作中途刷新）
+  const closeBtn = `onclick="document.getElementById('ac-group-member-overlay')?.remove();_acGroupCache=null;acLoadGroupsView()"`;
+
+  document.getElementById('ac-group-member-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'ac-group-member-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal" style="max-width:500px;width:95vw;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      👥 管理成员 — <span style="color:var(--accent)">${escHtml(gname)}</span>
+      <span class="modal-close" ${closeBtn}>×</span>
+    </div>
+    <div class="modal-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">
+          当前成员（<span id="ac-member-count">${members.length}</span>人）
+        </div>
+        <div id="ac-member-list">${memberListHTML()}</div>
+      </div>
+      <div id="ac-add-area">${addAreaHTML()}</div>
+    </div>
+    <div class="modal-footer" style="flex-shrink:0">
+      <button class="btn" ${closeBtn}>关闭</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+
+  // 把成员数据暂存到闭包变量供添加/移除函数使用
+  window._acGMemberIds   = memberIds;
+  window._acGMembers     = members;
+  window._acGNonMembers  = nonMembers;
+  window._acGAllUsers    = users;
+}
+
+async function acAddGroupMember(gid, gname) {
+  const uid = parseInt(document.getElementById('ac-add-member-sel')?.value);
+  if (!uid) { alert('请选择用户'); return; }
+  await api('POST', `/plus/groups/${gid}/members`, { user_id: uid });
+
+  // 本地更新，不重新打开弹窗
+  const u = window._acGAllUsers?.find(x => x.id === uid);
+  if (u) {
+    window._acGMemberIds.add(uid);
+    window._acGMembers    = window._acGAllUsers.filter(x => window._acGMemberIds.has(x.id));
+    window._acGNonMembers = window._acGAllUsers.filter(x => !window._acGMemberIds.has(x.id));
+    const userName = x => escHtml(x.full_name || `#${x.id}`);
+    const memberList = document.getElementById('ac-member-list');
+    const addArea    = document.getElementById('ac-add-area');
+    const countEl    = document.getElementById('ac-member-count');
+    if (memberList) memberList.innerHTML = window._acGMembers.length
+      ? window._acGMembers.map(x => `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;
+          background:var(--bg3);border-radius:6px;margin-bottom:4px">
+          <span style="flex:1;font-size:13px;color:var(--text)">👤 ${userName(x)}</span>
+          <button onclick="acRemoveGroupMember(${gid},${x.id},'${escHtml(gname)}')"
+            style="background:none;border:1px solid var(--border);border-radius:4px;
+                   color:var(--red);font-size:12px;padding:3px 8px;cursor:pointer">移除</button>
+        </div>`).join('')
+      : `<div style="color:var(--text3);font-size:13px;padding:8px 0">暂无成员</div>`;
+    if (addArea) addArea.innerHTML = window._acGNonMembers.length
+      ? `<div>
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">添加成员</div>
+          <div style="display:flex;gap:8px">
+            <select id="ac-add-member-sel" style="flex:1;padding:7px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+              <option value="">-- 选择用户 --</option>
+              ${window._acGNonMembers.map(x => `<option value="${x.id}">${userName(x)}</option>`).join('')}
+            </select>
+            <button onclick="acAddGroupMember(${gid},'${escHtml(gname)}')" class="btn btn-primary btn-sm">添加</button>
+          </div>
+        </div>`
+      : `<div style="color:var(--text3);font-size:13px">所有用户已在组内</div>`;
+    if (countEl) countEl.textContent = window._acGMembers.length;
+  }
+}
+
+async function acRemoveGroupMember(gid, uid, gname) {
+  if (!confirm('确认从组中移除该成员？')) return;
+  await api('DELETE', `/plus/groups/${gid}/members/${uid}`);
+
+  // 本地更新，不重新打开弹窗
+  window._acGMemberIds?.delete(uid);
+  window._acGMembers    = window._acGAllUsers?.filter(x => window._acGMemberIds?.has(x.id)) || [];
+  window._acGNonMembers = window._acGAllUsers?.filter(x => !window._acGMemberIds?.has(x.id)) || [];
+  const userName = x => escHtml(x.full_name || `#${x.id}`);
+  const memberList = document.getElementById('ac-member-list');
+  const addArea    = document.getElementById('ac-add-area');
+  const countEl    = document.getElementById('ac-member-count');
+  if (memberList) memberList.innerHTML = window._acGMembers.length
+    ? window._acGMembers.map(x => `<div style="display:flex;align-items:center;gap:10px;padding:7px 12px;
+        background:var(--bg3);border-radius:6px;margin-bottom:4px">
+        <span style="flex:1;font-size:13px;color:var(--text)">👤 ${userName(x)}</span>
+        <button onclick="acRemoveGroupMember(${gid},${x.id},'${escHtml(gname)}')"
+          style="background:none;border:1px solid var(--border);border-radius:4px;
+                 color:var(--red);font-size:12px;padding:3px 8px;cursor:pointer">移除</button>
+      </div>`).join('')
+    : `<div style="color:var(--text3);font-size:13px;padding:8px 0">暂无成员</div>`;
+  if (addArea) addArea.innerHTML = window._acGNonMembers.length
+    ? `<div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">添加成员</div>
+        <div style="display:flex;gap:8px">
+          <select id="ac-add-member-sel" style="flex:1;padding:7px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+            <option value="">-- 选择用户 --</option>
+            ${window._acGNonMembers.map(x => `<option value="${x.id}">${userName(x)}</option>`).join('')}
+          </select>
+          <button onclick="acAddGroupMember(${gid},'${escHtml(gname)}')" class="btn btn-primary btn-sm">添加</button>
+        </div>
+      </div>`
+    : `<div style="color:var(--text3);font-size:13px">所有用户已在组内</div>`;
+  if (countEl) countEl.textContent = window._acGMembers.length;
+}
+
+// ── 模板管理 ─────────────────────────────────────────────────
+let _acTemplates = [];
+
+async function acShowTemplates(t) {
+  if (!t) return;
+  const isAdmin = !!state.user?.is_admin;
+  // 拉取模板列表
+  const res = await api('GET', `/plus/templates?table_name=${encodeURIComponent(t.name)}`);
+  _acTemplates = res.templates || [];
+  acRenderTemplateModal(t, isAdmin);
+}
+
+function acRenderTemplateModal(t, isAdmin) {
+  const typeLabel = { xlsx: '📊 Excel', docx: '📝 Word', html: '🌐 HTML' };
+  const typeColor = { xlsx: 'var(--green)', docx: 'var(--accent)', html: 'var(--yellow)' };
+  const universal = _acTemplates.filter(tp => tp.table_name === '');
+  const specific  = _acTemplates.filter(tp => tp.table_name === t.name);
+
+  const renderGroup = (list, groupTitle) => {
+    if (!list.length) return '';
+    return `
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;
+                  letter-spacing:.06em;margin:14px 0 6px">${groupTitle}</div>
+      ${list.map(tp => `
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;
+                  background:var(--bg3);border-radius:8px;margin-bottom:6px">
+        <span style="font-size:13px;font-weight:600;color:${typeColor[tp.file_type]||'var(--text)'};
+                     min-width:70px">${typeLabel[tp.file_type]||tp.file_type}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;color:var(--text);font-weight:500;
+                      overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(tp.name)}</div>
+          ${tp.description ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">${escHtml(tp.description)}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:4px;flex-shrink:0">
+          ${tp.file_type === 'html'
+            ? `<button onclick="acExportHTML(${tp.id})"
+                style="background:var(--bg2);border:1px solid var(--border);border-radius:5px;
+                       color:var(--text2);font-size:12px;padding:4px 10px;cursor:pointer">
+                🌐 预览
+              </button>`
+            : `<button onclick="acExportDownload(${tp.id})"
+                style="background:var(--bg2);border:1px solid var(--border);border-radius:5px;
+                       color:var(--text2);font-size:12px;padding:4px 10px;cursor:pointer">
+                ⬇ 导出
+              </button>`
+          }
+          <a href="/api/plus/templates/${tp.id}/download?token=${encodeURIComponent(state.token)}"
+            style="background:var(--bg2);border:1px solid var(--border);border-radius:5px;
+                   color:var(--text3);font-size:12px;padding:4px 10px;cursor:pointer;
+                   text-decoration:none;display:flex;align-items:center"
+            download title="下载模板文件">📥</a>
+          ${isAdmin ? `<button onclick="acDeleteTemplate(${tp.id})"
+            style="background:none;border:1px solid var(--border);border-radius:5px;
+                   color:var(--red);font-size:12px;padding:4px 8px;cursor:pointer"
+            title="删除">×</button>` : ''}
+        </div>
+      </div>`).join('')}`;
+  };
+
+  const emptyHint = (!universal.length && !specific.length)
+    ? `<div style="padding:32px;text-align:center;color:var(--text3)">
+        <div style="font-size:32px;margin-bottom:8px">📄</div>
+        <div style="font-size:13px">暂无模板，${isAdmin ? '点击右上角上传' : '请联系管理员添加'}</div>
+      </div>` : '';
+
+  acShowModal(`<div class="modal" style="max-width:640px;width:95vw;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      📄 模板管理 — <span style="color:var(--accent);font-size:13px">${escHtml(t.label || t.name)}</span>
+      <span class="modal-close" onclick="acCloseModal()">×</span>
+    </div>
+    <div class="modal-body" style="flex:1;overflow-y:auto">
+
+      <!-- 导出操作区 -->
+      <div style="background:var(--bg3);border-radius:8px;padding:12px 14px;margin-bottom:4px;
+                  display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:13px;color:var(--text2)">快速导出：</span>
+        <button onclick="acExportDefault()"
+          style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+                 color:var(--text);font-size:13px;padding:6px 14px;cursor:pointer">
+          📊 默认 Excel（无模板）
+        </button>
+        ${isAdmin ? `
+        <button onclick="acDownloadSkeleton()"
+          style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+                 color:var(--text2);font-size:12px;padding:6px 12px;cursor:pointer"
+          title="下载含字段标记的骨架模板，编辑后上传">
+          🦴 下载骨架模板
+        </button>` : ''}
+        ${isAdmin ? `
+        <button onclick="acOpenUploadTemplate()"
+          style="background:var(--accent);border:none;border-radius:6px;
+                 color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;margin-left:auto">
+          ＋ 上传模板
+        </button>` : ''}
+      </div>
+
+      <!-- 模板列表 -->
+      ${emptyHint}
+      ${renderGroup(specific, `📌 ${escHtml(t.label||t.name)} 专属模板`)}
+      ${renderGroup(universal, '🌐 通用模板')}
+    </div>
+    <div class="modal-footer" style="flex-shrink:0">
+      <button class="btn" onclick="acCloseModal()">关闭</button>
+    </div>
+  </div>`);
+}
+
+// 默认 xlsx 导出（无模板）
+async function acExportDefault() {
+  if (!_acActiveTable) return;
+  acDownloadExport(_acActiveTable.name, 0);
+}
+
+// 用模板导出 Excel/Word
+async function acExportDownload(templateId) {
+  if (!_acActiveTable) return;
+  acDownloadExport(_acActiveTable.name, templateId);
+}
+
+// 触发文件下载的通用函数
+async function acDownloadExport(tableName, templateId) {
+  const url = `/api/plus/${tableName}/export?template_id=${templateId}`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + state.token
+      },
+      body: JSON.stringify({
+        sort_by: _acRowSort,
+        sort_dir: _acRowDir,
+        filters: []
+      })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.error || '导出失败');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    // 从 Content-Disposition 解码文件名
+    let filename = '导出文件';
+    const fnMatch = cd.match(/filename\*=UTF-8''(.+)/i) || cd.match(/filename="?([^"]+)"?/i);
+    if (fnMatch) {
+      try { filename = decodeURIComponent(fnMatch[1]); } catch(e) { filename = fnMatch[1]; }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e) {
+    alert('导出失败: ' + e.message);
+  }
+}
+
+// HTML 模板：新标签页预览
+function acExportHTML(templateId) {
+  if (!_acActiveTable) return;
+  const url = `/pages/appcenter/${_acActiveTable.name}?template=${templateId}&sort_by=${_acRowSort}&sort_dir=${_acRowDir}&token=${encodeURIComponent(state.token)}`;
+  window.open(url, '_blank');
+}
+
+// 下载骨架模板（管理员）
+function acDownloadSkeleton() {
+  if (!_acActiveTable) return;
+  const url = `/api/plus/templates/skeleton?table_name=${encodeURIComponent(_acActiveTable.name)}`;
+  // 需要携带 token，用 fetch + blob
+  fetch(url, { headers: { 'Authorization': 'Bearer ' + state.token } })
+    .then(r => {
+      if (!r.ok) return r.json().then(e => Promise.reject(e.error || '下载失败'));
+      return r.blob().then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (_acActiveTable.label || _acActiveTable.name) + '_模板骨架.xlsx';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+    })
+    .catch(e => alert(String(e)));
+}
+
+// 上传模板弹窗
+function acOpenUploadTemplate() {
+  if (!_acActiveTable) return;
+  const t = _acActiveTable;
+  acShowModal(`<div class="modal" style="max-width:500px;width:95vw">
+    <div class="modal-header">上传模板<span class="modal-close" onclick="acShowTemplates(_acActiveTable)">×</span></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>模板名称 *</label>
+        <input id="ac-tpl-name" placeholder="如：报销月报">
+      </div>
+      <div class="form-group">
+        <label>模板文件 * <span style="font-size:11px;color:var(--text3)">（.xlsx / .docx / .html）</span></label>
+        <input type="file" id="ac-tpl-file" accept=".xlsx,.docx,.html,.htm" style="color:var(--text)">
+      </div>
+      <div class="form-group">
+        <label>适用范围</label>
+        <select id="ac-tpl-scope" style="width:100%;padding:8px 10px;background:var(--bg1);
+          border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <option value="${escHtml(t.name)}">📌 专属此表（${escHtml(t.label||t.name)}）</option>
+          <option value="">🌐 通用模板（可用于所有表）</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>描述（可选）</label>
+        <input id="ac-tpl-desc" placeholder="模板用途说明">
+      </div>
+      <div style="background:var(--bg3);border-radius:6px;padding:10px 12px;font-size:12px;color:var(--text3);line-height:1.7">
+        💡 模板标记说明：<br>
+        <code style="color:var(--accent)">{{table_name}}</code> 表显示名 &nbsp;
+        <code style="color:var(--accent)">{{export_date}}</code> 导出日期 &nbsp;
+        <code style="color:var(--accent)">{{total_rows}}</code> 总行数<br>
+        数据行区域：<code style="color:var(--green)">{{#ROW}}</code>
+        &nbsp;<code style="color:var(--accent)">{{col.字段名}}</code>&nbsp;或&nbsp;
+        <code style="color:var(--accent)">{{col.f_0}}</code>&nbsp;
+        <code style="color:var(--green)">{{/ROW}}</code>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acShowTemplates(_acActiveTable)">取消</button>
+      <button class="btn btn-primary" onclick="acUploadTemplate()">上传</button>
+    </div>
+  </div>`);
+}
+
+async function acUploadTemplate() {
+  const name  = document.getElementById('ac-tpl-name')?.value.trim();
+  const file  = document.getElementById('ac-tpl-file')?.files[0];
+  const scope = document.getElementById('ac-tpl-scope')?.value;
+  const desc  = document.getElementById('ac-tpl-desc')?.value.trim();
+  if (!name) { alert('请填写模板名称'); return; }
+  if (!file) { alert('请选择模板文件'); return; }
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('name', name);
+  fd.append('table_name', scope);
+  fd.append('description', desc || '');
+
+  try {
+    const res = await fetch('/api/plus/templates', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || '上传失败'); return; }
+    // 刷新模板列表
+    await acShowTemplates(_acActiveTable);
+  } catch(e) {
+    alert('上传失败: ' + e.message);
+  }
+}
+
+async function acDeleteTemplate(id) {
+  if (!confirm('确认删除此模板？')) return;
+  await api('DELETE', `/plus/templates/${id}`);
+  await acShowTemplates(_acActiveTable);
+}
+
+let _acRowPage = 1;
+let _acRowSort = 'id';
+let _acRowDir  = 'desc';
+let _acRowData = [];
+let _acRowTotal = 0;
+
+async function acLoadRows() {
+  if (!_acActiveTable) return;
+  const q = document.getElementById('ac-row-search')?.value || '';
+  const res = await api('POST', `/plus/${_acActiveTable.name}/query`, {
+    q, sort_by: _acRowSort, sort_dir: _acRowDir, page: _acRowPage, page_size: 50
+  });
+  _acRowData  = res.data  || [];
+  _acRowTotal = res.total || 0;
+  if (res.fields) _acActiveTable.fields = res.fields;
+  acRenderRowTable();
+  acRenderRowPagination();
+}
+
+function acRenderRowTable() {
+  const wrap = document.getElementById('ac-row-wrap');
+  if (!wrap) return;
+  const fields = _acActiveTable?.fields || [];
+  if (!_acRowData.length) {
+    wrap.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">暂无数据</div>';
+    return;
+  }
+  const thStyle = 'padding:10px 12px;text-align:left;font-size:12px;font-weight:600;color:var(--text3);white-space:nowrap;cursor:pointer;user-select:none;border-bottom:1px solid var(--border)';
+  const tdStyle = 'padding:9px 12px;font-size:13px;border-bottom:1px solid var(--border);vertical-align:middle;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  const arrow = fid => {
+    if (_acRowSort !== fid) return ' <span style="color:var(--text3);font-size:10px">⇅</span>';
+    return _acRowDir === 'asc' ? ' <span style="color:var(--accent);font-size:11px">↑</span>' : ' <span style="color:var(--accent);font-size:11px">↓</span>';
+  };
+  // 用户姓名查找（_acUserCache 可能异步还未就绪，降级显示 id）
+  const userName = uid => {
+    if (!uid && uid !== 0) return '—';
+    const u = (_acUserCache || []).find(x => x.id === Number(uid));
+    return u ? (u.full_name || `#${uid}`) : `#${uid}`;
+  };
+  const thOpStyle = 'padding:10px 8px;text-align:center;font-size:12px;font-weight:600;color:var(--text3);white-space:nowrap;border-bottom:1px solid var(--border);width:84px;background:var(--bg2)';
+  const thCreatorStyle = 'padding:10px 12px;text-align:left;font-size:12px;font-weight:600;color:var(--text3);white-space:nowrap;border-bottom:1px solid var(--border);background:var(--bg2);min-width:80px';
+  const thead = `<tr>
+    <th style="${thStyle};background:var(--bg2)" onclick="acSetSort('id')">#${arrow('id')}</th>
+    ${fields.map(f => `<th style="${thStyle};background:var(--bg2)" onclick="acSetSort('${f.id}')">${escHtml(f.name)}${arrow(f.id)}</th>`).join('')}
+    <th style="${thCreatorStyle}">创建人</th>
+    <th style="${thOpStyle}">操作</th>
+  </tr>`;
+  const tbody = _acRowData.map(row => `
+    <tr onmouseenter="this.style.background='var(--bg3)'" onmouseleave="this.style.background=''">
+      <td style="${tdStyle};color:var(--text3);font-size:11px">${row.id}</td>
+      ${fields.map(f => {
+        const v = row[f.id] ?? '';
+        return `<td style="${tdStyle}" title="${escHtml(String(v))}">${escHtml(String(v))}</td>`;
+      }).join('')}
+      <td style="${tdStyle};color:var(--text3);font-size:12px" title="uid: ${row.created_by}">${escHtml(userName(row.created_by))}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:center;white-space:nowrap;width:84px">
+        <button onclick="acEditRow(${row.id})" title="编辑"
+          style="background:none;border:none;cursor:pointer;font-size:15px;padding:2px 5px;opacity:.7"
+          onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.7'">✏️</button>
+        <button onclick="acDeleteRow(${row.id})" title="删除"
+          style="background:none;border:none;cursor:pointer;font-size:15px;padding:2px 5px;opacity:.7;color:var(--red)"
+          onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.7'">🗑️</button>
+      </td>
+    </tr>`).join('');
+  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse">
+    <thead style="position:sticky;top:0;background:var(--bg2);z-index:1">${thead}</thead>
+    <tbody>${tbody}</tbody>
+  </table>`;
+}
+
+function acSetSort(col) {
+  if (_acRowSort === col) _acRowDir = _acRowDir === 'asc' ? 'desc' : 'asc';
+  else { _acRowSort = col; _acRowDir = 'desc'; }
+  _acRowPage = 1;
+  acLoadRows();
+}
+
+function acRenderRowPagination() {
+  const el = document.getElementById('ac-row-pagination');
+  if (!el) return;
+  const totalPages = Math.max(1, Math.ceil(_acRowTotal / 50));
+  el.innerHTML = `
+    <span style="font-size:12px;color:var(--text3)">共 ${_acRowTotal} 条</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button class="btn btn-sm" onclick="_acRowPage=Math.max(1,_acRowPage-1);acLoadRows()" ${_acRowPage<=1?'disabled':''}>‹ 上一页</button>
+      <span style="font-size:12px;color:var(--text2)">${_acRowPage} / ${totalPages}</span>
+      <button class="btn btn-sm" onclick="_acRowPage=Math.min(${totalPages},_acRowPage+1);acLoadRows()" ${_acRowPage>=totalPages?'disabled':''}>下一页 ›</button>
+    </div>`;
+}
+
+function acAddRow() { acOpenRowModal(null); }
+function acEditRow(id) {
+  const row = _acRowData.find(r => r.id === id);
+  if (row) acOpenRowModal(row);
+}
+
+function acOpenRowModal(row) {
+  const fields = _acActiveTable?.fields || [];
+  const isEdit = !!row;
+  acShowModal(`<div class="modal" style="max-width:560px;width:95vw">
+    <div class="modal-header">${isEdit ? '编辑数据' : '新增数据'}<span class="modal-close" onclick="acCloseModal()">×</span></div>
+    <div class="modal-body">
+      ${fields.map(f => `
+        <div class="form-group">
+          <label>${escHtml(f.name)}${f.required ? ' *' : ''}</label>
+          <input id="ac-row-${f.id}" value="${escHtml(String(row?.[f.id]??''))}" placeholder="${escHtml(f.name)}"
+            type="${f.type==='number'?'number':'text'}">
+        </div>`).join('')}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="acSaveRow(${row?.id||0})">${isEdit?'保存':'添加'}</button>
+    </div>
+  </div>`);
+}
+
+async function acSaveRow(id) {
+  const fields = _acActiveTable?.fields || [];
+  const body = {};
+  for (const f of fields) {
+    const el = document.getElementById(`ac-row-${f.id}`);
+    if (el) body[f.id] = f.type === 'number' ? parseFloat(el.value)||0 : el.value;
+  }
+  if (id) {
+    await api('PUT', `/plus/${_acActiveTable.name}/rows/${id}`, body);
+  } else {
+    await api('POST', `/plus/${_acActiveTable.name}/rows`, body);
+  }
+  acCloseModal();
+  _acRowPage = 1;
+  await acLoadRows();
+}
+
+async function acDeleteRow(id) {
+  if (!confirm('确认删除这条数据？')) return;
+  await api('DELETE', `/plus/${_acActiveTable.name}/rows/${id}`);
+  await acLoadRows();
+}
 
 // INIT
 // ============================================================
