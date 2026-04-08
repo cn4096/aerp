@@ -9365,8 +9365,27 @@ async function saLoadSysInfo() {
       section('🚀', '应用信息',
         `<tr>
           <td style="padding:9px 16px;font-size:13px;color:var(--text3);white-space:nowrap;width:120px">软件版本</td>
-          <td style="padding:9px 16px;font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace"
-              title="${escHtml(d.go.version)}">${escHtml(String(d.go.app_version||'—'))}</td>
+          <td style="padding:9px 16px;font-size:13px;color:var(--text);font-family:'JetBrains Mono',monospace">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+              <span title="${escHtml(d.go.version)}">${escHtml(String(d.go.app_version||'—'))}</span>
+              <button id="sa-ota-check-btn" onclick="saOTACheck(this)"
+                style="padding:3px 10px;background:var(--bg3);border:1px solid var(--border);
+                       border-radius:5px;color:var(--text2);font-size:12px;cursor:pointer;white-space:nowrap"
+                onmouseenter="this.style.background='var(--bg2)'"
+                onmouseleave="this.style.background='var(--bg3)'">🔍 检查更新</button>
+              <span id="sa-ota-result" style="font-size:12px"></span>
+              <button id="sa-ota-update-btn" style="display:none;padding:3px 10px;
+                background:var(--accent);border:none;border-radius:5px;color:#fff;
+                font-size:12px;cursor:pointer;white-space:nowrap"
+                onclick="saOTADoUpdate(this)">⬆️ 立即更新</button>
+            </div>
+            <div id="sa-ota-progress" style="display:none;margin-top:8px">
+              <div style="background:var(--bg3);border-radius:4px;height:8px;overflow:hidden;margin-bottom:4px">
+                <div id="sa-ota-bar" style="height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width .3s"></div>
+              </div>
+              <div id="sa-ota-status" style="font-size:11px;color:var(--text3)"></div>
+            </div>
+          </td>
         </tr>` +
         row('构建日期', d.go.build_time  || '—') +
         row('协程数',   d.go.goroutines) +
@@ -9388,6 +9407,149 @@ async function saLoadSysInfo() {
   } catch(e) {
     if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
   }
+}
+
+
+// ── OTA 更新 ──────────────────────────────────────────────────────────────────
+
+let _otaEventSource = null;  // SSE 连接
+let _otaHasUpdate = false;   // 当前是否有可用更新
+
+// 检查更新（仅查询，不下载）
+async function saOTACheck(btn) {
+  const result = document.getElementById('sa-ota-result');
+  const updateBtn = document.getElementById('sa-ota-update-btn');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '检查中…';
+  if (result) { result.textContent = ''; result.style.color = ''; }
+  if (updateBtn) updateBtn.style.display = 'none';
+  _otaHasUpdate = false;
+
+  try {
+    const res = await api('GET', '/admin/ota/check');
+    const binInfo = res.bin && res.bin[0];
+    const hasUpdate = (binInfo && binInfo.has_update) ||
+                      (res.res && res.res.some(r => r.has_update));
+
+    if (hasUpdate) {
+      _otaHasUpdate = true;
+      const lines = [];
+      if (binInfo && binInfo.has_update) {
+        const note = binInfo.note ? `（${binInfo.note}）` : '';
+        lines.push(`主程序 ${binInfo.cur_version} → ${binInfo.new_version}${note}`);
+      }
+      if (res.res) {
+        for (const r of res.res) {
+          if (r.has_update) {
+            const note = r.note ? `（${r.note}）` : '';
+            lines.push(`资源 ${r.cur_version || '—'} → ${r.new_version}${note}`);
+          }
+        }
+      }
+      if (result) {
+        result.innerHTML = `<span style="color:var(--accent)">🆕 发现新版本：${escHtml(lines.join('；'))}</span>`;
+      }
+      if (updateBtn) updateBtn.style.display = '';
+    } else {
+      const ver = binInfo ? binInfo.cur_version : '';
+      if (result) {
+        result.innerHTML = `<span style="color:var(--green)">✓ 已是最新版本${ver ? '（' + escHtml(ver) + '）' : ''}</span>`;
+      }
+    }
+  } catch(e) {
+    if (result) {
+      result.innerHTML = `<span style="color:var(--red)">✗ 检查失败：${escHtml(e.message)}</span>`;
+    }
+  } finally {
+    btn.textContent = orig;
+    btn.disabled = false;
+  }
+}
+
+// 立即更新
+async function saOTADoUpdate(btn) {
+  if (!_otaHasUpdate) return;
+  if (!confirm('确认开始更新？更新完成后程序将自动重启。')) return;
+
+  btn.disabled = true;
+  btn.textContent = '更新中…';
+  const checkBtn = document.getElementById('sa-ota-check-btn');
+  if (checkBtn) checkBtn.disabled = true;
+
+  const progress = document.getElementById('sa-ota-progress');
+  const bar = document.getElementById('sa-ota-bar');
+  const status = document.getElementById('sa-ota-status');
+  if (progress) progress.style.display = '';
+
+  saOTAStartSSE(bar, status, btn, checkBtn);
+
+  try {
+    await api('POST', '/admin/ota/update');
+  } catch(e) {
+    if (status) status.textContent = '触发失败：' + e.message;
+    btn.disabled = false;
+    btn.textContent = '⬆️ 立即更新';
+    if (checkBtn) checkBtn.disabled = false;
+  }
+}
+
+// SSE 监听更新进度
+function saOTAStartSSE(bar, status, updateBtn, checkBtn) {
+  if (_otaEventSource) { _otaEventSource.close(); _otaEventSource = null; }
+
+  _otaEventSource = new EventSource('/api/admin/ota/events');
+
+  _otaEventSource.onmessage = (ev) => {
+    let e;
+    try { e = JSON.parse(ev.data); } catch { return; }
+
+    const appLabel = e.app_id && e.app_id.includes('static') ? '资源' : '主程序';
+
+    if (e.state === 'downloading') {
+      const pct = e.pct || 0;
+      if (bar) bar.style.width = pct + '%';
+      if (status) status.textContent = appLabel + ' 下载中 ' + pct + '%…';
+    } else if (e.state === 'restarting') {
+      if (bar) bar.style.width = '100%';
+      if (status) status.textContent = '主程序更新完成（' + e.old_version + ' → ' + e.new_version + '），即将重启…';
+      if (updateBtn) updateBtn.textContent = '重启中…';
+      setTimeout(() => location.reload(), 6000);
+      _otaEventSource.close(); _otaEventSource = null;
+    } else if (e.state === 'done') {
+      // 资源更新完成：进度条满，状态提示，等待后续主程序检查结果
+      if (bar) bar.style.width = '100%';
+      if (status) status.textContent = appLabel + ' 更新完成（' + e.old_version + ' → ' + e.new_version + '）';
+    } else if (e.state === 'up_to_date') {
+      // 主程序已是最新（资源更新完后会检查主程序）：说明本次更新全部完成
+      const isBin = !(e.app_id && e.app_id.includes('static'));
+      if (isBin) {
+        // 主程序无需更新，整个流程结束
+        if (bar) bar.style.width = '100%';
+        if (status) status.textContent = '✅ 更新完成，主程序已是最新（' + e.old_version + '）';
+        if (updateBtn) { updateBtn.disabled = false; updateBtn.textContent = '✓ 已是最新'; }
+        if (checkBtn) checkBtn.disabled = false;
+        _otaHasUpdate = false;
+        _otaEventSource.close(); _otaEventSource = null;
+      } else {
+        if (status) status.textContent = appLabel + ' 已是最新（' + e.old_version + '）';
+      }
+    } else if (e.state === 'error') {
+      if (bar) bar.style.background = 'var(--red)';
+      if (status) status.textContent = appLabel + ' 出错：' + e.err;
+      if (updateBtn) { updateBtn.disabled = false; updateBtn.textContent = '⬆️ 重试更新'; }
+      if (checkBtn) checkBtn.disabled = false;
+      _otaEventSource.close(); _otaEventSource = null;
+    } else if (e.state === 'verifying') {
+      if (status) status.textContent = appLabel + ' 校验中…';
+    } else if (e.state === 'installing') {
+      if (status) status.textContent = appLabel + ' 安装中…';
+    }
+  };
+
+  _otaEventSource.onerror = () => {
+    if (_otaEventSource) { _otaEventSource.close(); _otaEventSource = null; }
+  };
 }
 
 // ── 手动 GC ──────────────────────────────────────────────────
@@ -9467,7 +9629,24 @@ async function saLoadSettings() {
       // ── 界面设置 ──
       card('🎨', '界面设置',
         inputRow('左上角标题', 'logo_title', '智云 ERP', '侧边栏左上角大标题') +
-        inputRow('左上角副标题', 'logo_sub', 'v1.0 · Enterprise', '大标题下方的小字'),
+        inputRow('左上角副标题', 'logo_sub', 'v1.0 · Enterprise', '大标题下方的小字') +
+        `<div style="display:flex;align-items:flex-start;gap:16px;padding:12px 0;border-bottom:1px solid var(--border)">
+          <div style="width:110px;flex-shrink:0;font-size:13px;color:var(--text3)">网站图标</div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+              <img id="sa-favicon-preview" src="/favicon.ico" style="width:32px;height:32px;object-fit:contain;border:1px solid var(--border);border-radius:4px;background:var(--bg3)" onerror="this.style.opacity='.3'">
+              <div>
+                <div style="font-size:12px;color:var(--text)">当前图标</div>
+                <div style="font-size:11px;color:var(--text3)">仅支持 .ico 格式，不超过 1MB</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="file" id="sa-favicon-input" accept=".ico" style="display:none" onchange="saUploadFavicon(this)">
+              <button class="btn btn-sm" onclick="document.getElementById('sa-favicon-input').click()">📁 选择 .ico 文件</button>
+              <span id="sa-favicon-status" style="font-size:12px;color:var(--text3)"></span>
+            </div>
+          </div>
+        </div>`,
         'ui'
       );
 
@@ -9726,6 +9905,7 @@ async function saLoadFeatures() {
         { id: 'chat',       icon: '💬', label: '聊天' },
         { id: 'email',      icon: '📧', label: '电子邮件' },
         { id: 'sharefiles', icon: '🗂️', label: '企业网盘' },
+        { id: 'webdav',     icon: '🌐', label: '网盘 WebDAV', defaultOff: true, indent: true },
         { id: 'bookmarks',  icon: '🔖', label: '我的网址' },
       ]},
       { label: '业务', items: [
@@ -9748,7 +9928,11 @@ async function saLoadFeatures() {
       ]},
     ];
 
-    const isOn = id => ff[id] !== false; // 默认全开
+    // 默认全开；defaultOff=true 的项目没有显式设置时默认关闭
+    const isOn = (id, defaultOff) => {
+      if (id in ff) return ff[id] !== false;
+      return defaultOff ? false : true;
+    };
 
     const toggleHtml = (id, on) => `
       <div id="sa-ff-toggle-${id}" data-on="${on?'1':''}" data-id="${id}"
@@ -9766,13 +9950,14 @@ async function saLoadFeatures() {
                     letter-spacing:.06em;padding:8px 0 4px">${g.label}</div>
         ${g.items.map(item => `
           <div style="display:flex;align-items:center;justify-content:space-between;
-                      padding:10px 16px;border-radius:8px;margin-bottom:4px;
-                      background:var(--bg3)">
+                      padding:${item.indent?'8px 16px 8px 36px':'10px 16px'};border-radius:8px;margin-bottom:4px;
+                      background:${item.indent?'var(--bg2)':'var(--bg3)'};
+                      ${item.indent?'border-left:2px solid var(--border);margin-left:12px':''}">
             <div style="display:flex;align-items:center;gap:10px">
-              <span style="font-size:16px">${item.icon}</span>
-              <span style="font-size:13px;color:var(--text)">${item.label}</span>
+              <span style="font-size:${item.indent?'13px':'16px'}">${item.icon}</span>
+              <span style="font-size:${item.indent?'12px':'13px'};color:${item.indent?'var(--text2)':'var(--text)'}">${item.label}</span>
             </div>
-            ${toggleHtml(item.id, isOn(item.id))}
+            ${toggleHtml(item.id, isOn(item.id, item.defaultOff))}
           </div>`).join('')}
       </div>`).join('');
 
@@ -9793,6 +9978,7 @@ async function saLoadFeatures() {
 
     // 暂存当前 ff 对象供 toggle 操作
     window._saFfCurrent = Object.assign({}, ff);
+    window._saFfGroups = groups;
   } catch(e) {
     if (body) body.innerHTML = `<div style="padding:20px;color:var(--red)">❌ 加载失败：${e.message}</div>`;
   }
@@ -9800,7 +9986,13 @@ async function saLoadFeatures() {
 
 function saFfToggle(id) {
   if (!window._saFfCurrent) window._saFfCurrent = {};
-  const cur = window._saFfCurrent[id] !== false; // 当前是否开
+  // 找到该 item 的 defaultOff 配置
+  const allItems = window._saFfGroups ? window._saFfGroups.flatMap(g => g.items) : [];
+  const item = allItems.find(i => i.id === id);
+  const defaultOff = item ? !!item.defaultOff : false;
+  const cur = id in window._saFfCurrent
+    ? window._saFfCurrent[id] !== false
+    : !defaultOff;
   const newVal = !cur;
   window._saFfCurrent[id] = newVal;
 
@@ -9896,6 +10088,37 @@ async function saSaveGroup(group, btn) {
     btn.disabled = true;
     setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
   } catch(e) { alert('保存失败：' + e.message); }
+}
+
+// 上传网站图标
+async function saUploadFavicon(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  input.value = '';
+  const status = document.getElementById('sa-favicon-status');
+  if (status) status.textContent = '上传中...';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const resp = await fetch('/api/admin/favicon', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.token },
+      body: fd,
+    });
+    const j = await resp.json();
+    if (!resp.ok) throw new Error(j.error || '上传失败');
+    // 刷新预览（加时间戳防缓存）
+    const prev = document.getElementById('sa-favicon-preview');
+    if (prev) prev.src = '/favicon.ico?t=' + Date.now();
+    // 刷新浏览器标签页图标
+    let link = document.querySelector("link[rel~='icon']");
+    if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+    link.href = '/favicon.ico?t=' + Date.now();
+    if (status) { status.textContent = '✓ 上传成功'; status.style.color = 'var(--green)'; }
+    setTimeout(() => { if (status) { status.textContent = ''; status.style.color = ''; } }, 3000);
+  } catch(e) {
+    if (status) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--red)'; }
+  }
 }
 
 // 应用logo设置到当前页面
@@ -11039,6 +11262,25 @@ const _sf = {
   .sf-act.danger:not(:disabled):hover { background:rgba(220,50,50,.12);border-color:var(--red);color:var(--red) }
   .sf-act.primary { background:var(--accent);color:#fff;border-color:var(--accent) }
   .sf-act.primary:not(:disabled):hover { opacity:0.88 }
+
+  /* ── 文件查看器 Markdown 样式 ── */
+  .sf-md-body h1,.sf-md-body h2,.sf-md-body h3,.sf-md-body h4 { font-weight:600;margin:1em 0 .4em;color:var(--text) }
+  .sf-md-body h1 { font-size:1.5em;border-bottom:1px solid var(--border);padding-bottom:.3em }
+  .sf-md-body h2 { font-size:1.25em;border-bottom:1px solid var(--border);padding-bottom:.2em }
+  .sf-md-body p  { margin:.6em 0;color:var(--text) }
+  .sf-md-body a  { color:var(--accent);text-decoration:none }
+  .sf-md-body a:hover { text-decoration:underline }
+  .sf-md-body code { background:var(--bg3);border-radius:4px;padding:1px 5px;font-family:'JetBrains Mono',monospace;font-size:.88em;color:var(--text) }
+  .sf-md-body pre { background:var(--bg3);border-radius:6px;padding:12px;overflow-x:auto;margin:.8em 0 }
+  .sf-md-body pre code { background:none;padding:0;font-size:12px;line-height:1.6 }
+  .sf-md-body blockquote { border-left:3px solid var(--accent);margin:.6em 0;padding:.3em .8em;color:var(--text2);background:var(--bg3);border-radius:0 4px 4px 0 }
+  .sf-md-body table { border-collapse:collapse;width:100%;margin:.8em 0;border-bottom:1px solid var(--border) }
+  .sf-md-body th,.sf-md-body td { border:1px solid var(--border);padding:6px 10px;font-size:13px }
+  .sf-md-body th { background:var(--bg3);font-weight:600 }
+  .sf-md-body ul,.sf-md-body ol { padding-left:1.5em;margin:.4em 0 }
+  .sf-md-body li { margin:.2em 0;color:var(--text) }
+  .sf-md-body hr { border:none;border-top:1px solid var(--border);margin:1em 0 }
+  .sf-md-body img { max-width:100%;border-radius:4px }
   /* list */
   .sf-list-table { width:100%;border-collapse:collapse;font-size:13px }
   .sf-list-table th { text-align:left;padding:6px 10px;color:var(--text3);font-weight:500;
@@ -11121,6 +11363,8 @@ function sfRenderToolbar() {
   // 按钮启用逻辑
   const canDownload  = onlyFiles && cnt >= 1;
   const canRename    = singleFile && !_sf.isWebDir;
+  const canView      = singleFile && sfIsTextFile(_sf.allItems.find(it=>`f:${it.id}`===sel.values().next().value));
+  const canEdit      = canView && _sf.canWrite;
   const canCopy      = onlyFiles && cnt >= 1;
   const canCut       = onlyFiles && cnt >= 1;
   const canPaste     = hasClip && _sf.canWrite;
@@ -11150,16 +11394,18 @@ function sfRenderToolbar() {
       <span class="sf-search-clear" id="sf-search-clear" onclick="sfSearchClear()" style="display:none">✕</span>
     </div>
     <div class="sf-tb-sep"></div>
-    ${(isAdmin || _sf.canWrite) ? `<button class="sf-act" onclick="sfNewDirModal()">📁 新建</button>` : ''}
+    ${(isAdmin || _sf.canWrite) ? `<button class="sf-act" onclick="sfNewFileModal()">📄 新建文件</button><button class="sf-act" onclick="sfNewDirModal()">📁 新建文件夹</button>` : ''}
     <button class="sf-act" onclick="sfActDownload()" ${canDownload?'':'disabled'} title="下载">⬇ 下载</button>
-    <button class="sf-act" onclick="sfActRename()" ${canRename?'':'disabled'} title="重命名">✏️ 重命名</button>
+    <button class="sf-act" onclick="sfActView()" ${canView?'':'disabled'} title="在线查看">👁 查看</button>
+    <button class="sf-act" onclick="sfActEdit()" ${canEdit?'':'disabled'} title="在线编辑">✏️ 编辑</button>
+    <button class="sf-act" onclick="sfActRename()" ${canRename?'':'disabled'} title="重命名">🔤 重命名</button>
     <div class="sf-tb-sep"></div>
     <button class="sf-act" onclick="sfActCopy()" ${canCopy?'':'disabled'} title="复制">📋 复制</button>
     <button class="sf-act" onclick="sfActCut()" ${canCut?'':'disabled'} title="剪切">✂️ 剪切</button>
     <button class="sf-act" onclick="sfPaste()" ${canPaste?'':'disabled'} title="粘贴${_sf.clipboard?'（'+(_sf.clipboard.items.length)+'个文件）':''}">📌 粘贴</button>
     ${_sf.dirID !== 0 ? `<button class="sf-act" onclick="sfActShare()" ${canShare?'':'disabled'} title="分享到公共盘">🔗 分享</button>` : ''}
     <div class="sf-tb-sep"></div>
-    <button class="sf-act danger" onclick="sfActDelete()" ${canDelete?'':'disabled'} title="删除">🗑 删除</button>
+    <button class="sf-act danger" onclick="sfActDelete()" ${canDelete?'':'disabled'} title="删除">✕ 删除</button>
     <div style="flex:1"></div>
     ${clipInfo}${selBadge}${multiChk}
     <div class="sf-tb-sep"></div>
@@ -11268,6 +11514,7 @@ function sfRenderList(hl) {
       <th style="width:80px;text-align:right">大小</th>
       <th style="width:90px">上传人</th>
       <th style="width:110px">时间</th>
+      ${isAdmin ? '<th style="width:72px"></th>' : ''}
     </tr></thead><tbody>`;
 
   _sf.allItems.forEach((item, idx) => {
@@ -11288,8 +11535,10 @@ function sfRenderList(hl) {
       const webLinkTip = item.admin_only && item.name === 'web'
         ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">→ 静态访问: /web/文件名</span>` : '';
       const adminOps = isAdmin ? `
-        <button class="btn btn-xs" onclick="event.stopPropagation();sfEditDirModal(${item.id},\`${escHtml(item.name)}\`,${item.max_file_mb})" title="编辑">✏️</button>
-        <button class="btn btn-xs" onclick="event.stopPropagation();sfPermModal(${item.id},\`${escHtml(item.name)}\`)" title="权限">🔐</button>` : '';
+        <td style="text-align:right;white-space:nowrap;padding-right:8px" onclick="event.stopPropagation()">
+          <button class="btn btn-xs" onclick="event.stopPropagation();sfEditDirModal(${item.id},\`${escHtml(item.name)}\`,${item.max_file_mb})" title="编辑">✏️</button>
+          <button class="btn btn-xs" onclick="event.stopPropagation();sfPermModal(${item.id},\`${escHtml(item.name)}\`)" title="权限">🔐</button>
+        </td>` : '';
       html += `<tr class="sf-row ${selCls} ${gray}" data-key="${key}" data-idx="${idx}"
           onclick="sfRowClick(event,${idx})"
           ondblclick="sfDirEnter(${item.id},${!canEnter})">
@@ -11297,17 +11546,18 @@ function sfRenderList(hl) {
         <td><div class="sf-name-cell">
           <span class="sf-file-icon">${item.admin_only ? '🔒' : '📁'}</span>
           <span class="nm">${hl(item.name)}</span>${noPermTip}${adminOnlyBadge}${webLinkTip}
-          <span style="margin-left:4px">${adminOps}</span>
         </div></td>
         <td style="text-align:right;color:var(--text3)">—</td>
         <td style="color:var(--text3)">—</td>
         <td style="color:var(--text3);font-size:12px">${(item.created_at||'').slice(0,10)}</td>
+        ${adminOps}
       </tr>`;
     } else {
       const icon = sfFileIcon(item.mime_type, item.name);
       const badge = item.is_shared ? `<span class="sf-shared-badge">分享</span>` : '';
       html += `<tr class="sf-row ${selCls}" data-key="${key}" data-idx="${idx}"
-          onclick="sfRowClick(event,${idx})">
+          onclick="sfRowClick(event,${idx})"
+          ondblclick="sfRowDblClick(${idx})">
         ${_sf.multiSelect ? '<td style="padding:6px 4px 6px 10px">' + chk + '</td>' : ''}
         <td><div class="sf-name-cell">
           <span class="sf-file-icon">${icon}</span>
@@ -11316,6 +11566,7 @@ function sfRenderList(hl) {
         <td style="text-align:right;color:var(--text3);white-space:nowrap">${sfFmtSize(item.size)}</td>
         <td style="color:var(--text3);overflow:hidden;text-overflow:ellipsis;max-width:90px;white-space:nowrap">${escHtml(item.uploader_name||'')}</td>
         <td style="color:var(--text3);font-size:12px;white-space:nowrap">${(item.created_at||'').slice(0,16)}</td>
+        ${isAdmin ? '<td></td>' : ''}
       </tr>`;
     }
   });
@@ -11353,6 +11604,7 @@ function sfRenderGrid(hl) {
       const icon = sfFileIcon(item.mime_type, item.name);
       html += `<div class="sf-grid-item ${selCls}" data-key="${key}" data-idx="${idx}"
           onclick="sfRowClick(event,${idx})"
+          ondblclick="sfRowDblClick(${idx})"
           title="${escHtml(item.name)}\n${sfFmtSize(item.size)}">
         ${_sf.multiSelect ? '<input type="checkbox" class="sf-grid-chk sf-grid-chk-vis" data-key="' + key + '" ' + (isSel?'checked':'')+' onclick="event.stopPropagation();sfRowChkClick(event,' + idx + ')">' : ''}
         <div class="sf-grid-icon">${icon}</div>
@@ -11685,37 +11937,9 @@ async function sfDoUpload(input) {
   const files = Array.from(input.files || []);
   if (!files.length) return;
   input.value = '';
-
-  const prog = sfProgressModal(files.length);
-  let ok = 0, fail = 0;
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    prog.setFile(file.name, 0, i + 1);
-    await new Promise(resolve => {
-      const fd = new FormData();
-      fd.append('file', file);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/share/dirs/${_sf.dirID}/upload`);
-      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
-      xhr.upload.onprogress = e => {
-        if (e.lengthComputable) prog.setFile(file.name, Math.round(e.loaded / e.total * 100), i + 1);
-      };
-      xhr.onload = () => {
-        prog.setFile(file.name, 100, i + 1);
-        try {
-          const j = JSON.parse(xhr.responseText);
-          if (xhr.status >= 200 && xhr.status < 300) ok++;
-          else { fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
-        } catch { fail++; }
-        resolve();
-      };
-      xhr.onerror = () => { fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
-      xhr.send(fd);
-    });
+  for (const file of files) {
+    await sfCheckAndUpload(file, _sf.dirID);
   }
-
-  prog.done(ok, fail);
   sfLoadDir(_sf.dirID);
 }
 
@@ -11812,28 +12036,8 @@ async function sfProcessEntry(entry, parentDirId, prog) {
     const file = await new Promise((res, rej) => entry.file(res, rej));
     prog._seq++;
     prog.setFile(entry.fullPath || entry.name, 0, prog._seq);
-    await new Promise(resolve => {
-      const fd = new FormData();
-      fd.append('file', file);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/share/dirs/${parentDirId}/upload`);
-      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
-      xhr.upload.onprogress = ev => {
-        if (ev.lengthComputable)
-          prog.setFile(entry.fullPath || entry.name, Math.round(ev.loaded / ev.total * 100), prog._seq);
-      };
-      xhr.onload = () => {
-        prog.setFile(entry.fullPath || entry.name, 100, prog._seq);
-        try {
-          const j = JSON.parse(xhr.responseText);
-          if (xhr.status >= 200 && xhr.status < 300) prog._counter.ok++;
-          else { prog._counter.fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
-        } catch { prog._counter.fail++; }
-        resolve();
-      };
-      xhr.onerror = () => { prog._counter.fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
-      xhr.send(fd);
-    });
+    const ok = await sfCheckAndUpload(file, parentDirId, { prog, seq: prog._seq, quiet: true });
+    if (ok) prog._counter.ok++; else prog._counter.fail++;
 
   } else if (entry.isDirectory) {
     // 在网盘创建对应子目录
@@ -11873,35 +12077,167 @@ function sfReadAllEntries(reader) {
 }
 
 // 普通文件列表上传（fallback）
+// 普通文件列表上传（拖拽 fallback）
 async function sfUploadFileList(files, dirId) {
   const prog = sfProgressModal(files.length);
   let ok = 0, fail = 0;
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     prog.setFile(file.name, 0, i + 1);
-    await new Promise(resolve => {
-      const fd = new FormData();
-      fd.append('file', file);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/share/dirs/${dirId}/upload`);
-      xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
-      xhr.upload.onprogress = ev => {
-        if (ev.lengthComputable) prog.setFile(file.name, Math.round(ev.loaded / ev.total * 100), i + 1);
-      };
-      xhr.onload = () => {
-        prog.setFile(file.name, 100, i + 1);
-        try {
-          const j = JSON.parse(xhr.responseText);
-          if (xhr.status >= 200 && xhr.status < 300) ok++;
-          else { fail++; sfToast('上传失败: ' + (j.error || xhr.status), 'error'); }
-        } catch { fail++; }
-        resolve();
-      };
-      xhr.onerror = () => { fail++; sfToast('上传失败: 网络错误', 'error'); resolve(); };
-      xhr.send(fd);
-    });
+    const result = await sfCheckAndUpload(file, dirId, { prog, seq: i + 1, quiet: true });
+    if (result) ok++; else fail++;
   }
   prog.done(ok, fail);
+}
+
+// ── 重名检查 + 单文件上传核心 ─────────────────────────────────────────────
+// 返回 true=成功 false=失败/跳过
+// opts: { prog, seq, quiet }  -- prog/seq 用于进度条，quiet 抑制 toast
+async function sfCheckAndUpload(file, dirId, opts = {}) {
+  // 1. 查重
+  let checkRes;
+  try {
+    checkRes = await api('GET', `/share/dirs/${dirId}/check-name?name=${encodeURIComponent(file.name)}`);
+  } catch(e) {
+    if (!opts.quiet) sfToast('检查文件名失败: ' + e.message, 'error');
+    return false;
+  }
+
+  let saveAs = '';      // 空 = 用原名
+  let replaceId = '';   // 非空 = 替换模式
+
+  if (checkRes.exists) {
+    // 2. 弹窗让用户选择
+    const decision = await sfDuplicateDialog(file.name, checkRes.file_id, dirId);
+    // decision: { action:'replace'|'rename'|'skip', replaceId?, saveAs? }
+    if (!decision || decision.action === 'skip') return false;
+    if (decision.action === 'replace') {
+      replaceId = String(decision.replaceId);
+    } else {
+      saveAs = decision.saveAs;
+    }
+  }
+
+  // 3. 上传
+  return await sfUploadOne(file, dirId, saveAs, replaceId, opts);
+}
+
+// 单文件 XHR 上传，返回 true/false
+function sfUploadOne(file, dirId, saveAs, replaceId, opts = {}) {
+  return new Promise(resolve => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (saveAs)    fd.append('save_as',    saveAs);
+    if (replaceId) fd.append('replace_id', replaceId);
+
+    const displayName = saveAs || file.name;
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/share/dirs/${dirId}/upload`);
+    xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+
+    if (opts.prog) {
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable)
+          opts.prog.setFile(displayName, Math.round(e.loaded / e.total * 100), opts.seq);
+      };
+    }
+    xhr.onload = () => {
+      if (opts.prog) opts.prog.setFile(displayName, 100, opts.seq);
+      try {
+        const j = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(true);
+        } else {
+          if (!opts.quiet) sfToast('上传失败: ' + (j.error || xhr.status), 'error');
+          resolve(false);
+        }
+      } catch { resolve(false); }
+    };
+    xhr.onerror = () => {
+      if (!opts.quiet) sfToast('上传失败: 网络错误', 'error');
+      resolve(false);
+    };
+    xhr.send(fd);
+  });
+}
+
+// 重名对话框：返回 Promise<{action, replaceId?, saveAs?}|null>
+function sfDuplicateDialog(filename, fileId, dirId) {
+  return new Promise(resolve => {
+    const ext  = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : '';
+    const base = filename.slice(0, filename.length - ext.length);
+    const suggestName = base + ' (1)' + ext;
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:11000;display:flex;align-items:center;justify-content:center';
+
+    overlay.innerHTML = `
+      <div style="background:var(--bg);border-radius:10px;padding:28px 28px 20px;min-width:340px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.28)">
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px">文件已存在</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:20px">
+          「<b>${escHtml(filename)}</b>」在当前文件夹中已存在，请选择操作：
+        </div>
+        <div id="sf-dup-rename-row" style="display:none;margin-bottom:14px">
+          <input id="sf-dup-newname" class="form-input" value="${escHtml(suggestName)}"
+            style="width:100%;box-sizing:border-box"
+            onkeydown="if(event.key==='Enter')document.getElementById('sf-dup-confirm-rename').click()">
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">输入新文件名后点击确认</div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+          <button id="sf-dup-confirm-rename" class="btn btn-primary" style="display:none" onclick="
+            const v = document.getElementById('sf-dup-newname').value.trim();
+            if (!v) return;
+            window._sfDupResolve({action:'rename', saveAs:v});
+          ">确认改名</button>
+          <button class="btn" onclick="
+            const row = document.getElementById('sf-dup-rename-row');
+            const btn = document.getElementById('sf-dup-confirm-rename');
+            const renameBtn = this;
+            row.style.display = 'block';
+            btn.style.display = '';
+            renameBtn.style.display = 'none';
+            setTimeout(()=>document.getElementById('sf-dup-newname')?.select(), 30);
+          ">使用新名称</button>
+          <button class="btn btn-primary" onclick="window._sfDupResolve({action:'replace', replaceId:${fileId}})">替换原文件</button>
+          <button class="btn" onclick="window._sfDupResolve(null)">跳过</button>
+        </div>
+      </div>`;
+
+    window._sfDupResolve = (result) => {
+      document.body.removeChild(overlay);
+      delete window._sfDupResolve;
+      resolve(result);
+    };
+    document.body.appendChild(overlay);
+    // 初始聚焦替换按钮
+  });
+}
+
+// ── 新建文件弹窗 ───────────────────────────────────────────────────────────
+function sfNewFileModal() {
+  sfModal(`
+    <div style="font-size:16px;font-weight:600;margin-bottom:20px">📄 新建文件</div>
+    <div class="form-row">
+      <label class="form-label" style="margin-bottom:6px">文件名（含扩展名）</label>
+      <input id="sfnf-name" class="form-input" placeholder="例如：readme.txt、report.md"
+        onkeydown="if(event.key==='Enter')sfDoNewFile()">
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:24px">
+      <button class="btn" onclick="sfCloseModal()">取消</button>
+      <button class="btn btn-primary" onclick="sfDoNewFile()">创建</button>
+    </div>`);
+  setTimeout(() => document.getElementById('sfnf-name')?.focus(), 50);
+}
+
+async function sfDoNewFile() {
+  const name = document.getElementById('sfnf-name')?.value.trim();
+  if (!name) { sfToast('请输入文件名', 'error'); return; }
+  try {
+    const res = await api('POST', `/share/dirs/${_sf.dirID}/newfile`, { name });
+    sfCloseModal();
+    await sfLoadDir(_sf.dirID);
+    sfToast(`已创建「${name}」`, 'success');
+  } catch(e) { sfToast(e.message, 'error'); }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────
@@ -11917,6 +12253,250 @@ function sfToast(msg, type) {
 }
 
 // ── 辅助 ──────────────────────────────────────────────────────────────────
+
+// ── 文本文件查看器 / 编辑器 ───────────────────────────────────────────────
+
+// 判断文件是否为可在线查看的文本类型
+function sfIsTextFile(item) {
+  if (!item) return false;
+  const mime = item.mime_type || '';
+  const name = (item.name || '').toLowerCase();
+  if (mime.startsWith('text/')) return true;
+  if (/\.(md|txt|log|csv|json|yaml|yml|xml|html|htm|css|js|ts|go|py|java|c|cpp|h|sh|bash|sql|ini|toml|conf|env|gitignore|dockerfile)$/.test(name)) return true;
+  return false;
+}
+
+// 双击文件行：文本文件→查看器，其他→下载
+function sfRowDblClick(idx) {
+  const item = _sf.allItems[idx];
+  if (!item || item.type !== 'f') return;
+  if (sfIsTextFile(item)) {
+    sfOpenViewer(item);
+  } else {
+    // 非文本文件：直接下载
+    const a = document.createElement('a');
+    a.href = `/api/share/files/${item.id}/download?token=${state.token}`;
+    a.download = item.name;
+    a.click();
+  }
+}
+
+// 工具栏"查看"
+function sfActView() {
+  const sel = [..._sf.selected];
+  if (sel.length !== 1 || !sel[0].startsWith('f:')) return;
+  const id = parseInt(sel[0].slice(2));
+  const item = _sf.allItems.find(it => it.type === 'f' && it.id === id);
+  if (item) sfOpenViewer(item);
+}
+
+// 工具栏"编辑"
+function sfActEdit() {
+  const sel = [..._sf.selected];
+  if (sel.length !== 1 || !sel[0].startsWith('f:')) return;
+  const id = parseInt(sel[0].slice(2));
+  const item = _sf.allItems.find(it => it.type === 'f' && it.id === id);
+  if (item) sfOpenEditor(item);
+}
+
+// 打开查看器弹窗
+async function sfOpenViewer(item) {
+  const MAX = 1024 * 1024;
+  if (item.size > MAX) {
+    sfToast(`文件超过 1MB，不支持在线查看，请下载后查看`);
+    return;
+  }
+  sfShowFileModal(`
+    <span style="font-size:16px;flex-shrink:0">${sfFileIcon(item.mime_type, item.name)}</span>
+    <span style="font-size:14px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(item.name)}</span>
+    ${_sf.canWrite && sfIsTextFile(item) ? `<button onclick="sfOpenEditor(window._sfViewerItem)" title="编辑此文件" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:15px;padding:2px 6px;color:var(--accent);line-height:1">✏️</button>` : ''}
+    <button onclick="sfCloseModal()" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:0 2px;margin-left:4px" title="关闭">✕</button>
+  `,
+  `<div id="sf-viewer-body" style="min-height:120px;display:flex;align-items:center;justify-content:center">
+    <div class="spinner"></div>
+  </div>`);
+  window._sfViewerItem = item;
+
+  let res;
+  try {
+    res = await api('GET', `/share/files/${item.id}/content`);
+  } catch(e) {
+    document.getElementById('sf-viewer-body').innerHTML =
+      `<div style="color:var(--red);padding:20px">❌ 加载失败：${escHtml(e.message)}</div>`;
+    return;
+  }
+
+  const content = res.content || '';
+  const name = (item.name || '').toLowerCase();
+  let bodyHtml = '';
+
+  if (name.endsWith('.md')) {
+    // Markdown 渲染：按需加载 marked.js
+    bodyHtml = await sfRenderMarkdown(content);
+  } else if (name.endsWith('.json')) {
+    let pretty = content;
+    try { pretty = JSON.stringify(JSON.parse(content), null, 2); } catch(_) {}
+    bodyHtml = `<pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--text)">${escHtml(pretty)}</pre>`;
+  } else {
+    bodyHtml = `<pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--text)">${escHtml(content)}</pre>`;
+  }
+
+  const el = document.getElementById('sf-viewer-body');
+  if (el) {
+    el.style.display = '';
+    el.style.minHeight = '';
+    el.style.alignItems = '';
+    el.style.justifyContent = '';
+    if (name.endsWith('.md')) {
+      el.innerHTML = `<div class="sf-md-body" style="line-height:1.7;color:var(--text);max-width:100%;overflow-x:auto">${bodyHtml}</div>`;
+    } else {
+      el.innerHTML = bodyHtml;
+    }
+  }
+}
+
+// 打开编辑器弹窗
+async function sfOpenEditor(item) {
+  const MAX = 1024 * 1024;
+  if (item.size > MAX) {
+    sfToast(`文件超过 1MB，不支持在线编辑`);
+    return;
+  }
+  sfShowFileModal(`
+    <span style="font-size:16px;flex-shrink:0">✏️</span>
+    <span style="font-size:14px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">编辑：${escHtml(item.name)}</span>
+    <button onclick="sfCloseModal()" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:0 2px" title="关闭">✕</button>
+  `,
+  `<div id="sf-editor-body" style="display:flex;align-items:center;justify-content:center;min-height:200px">
+    <div class="spinner"></div>
+  </div>`,
+  `<div style="display:flex;align-items:center;justify-content:space-between;width:100%">
+    <span id="sf-editor-chars" style="font-size:12px;color:var(--text3)"></span>
+    <button class="btn btn-primary" id="sf-editor-save" onclick="sfEditorSave(${item.id})">💾 保存</button>
+  </div>`);
+  window._sfEditorItem = item;
+
+  let res;
+  try {
+    res = await api('GET', `/share/files/${item.id}/content`);
+  } catch(e) {
+    document.getElementById('sf-editor-body').innerHTML =
+      `<div style="color:var(--red);padding:20px">❌ 加载失败：${escHtml(e.message)}</div>`;
+    return;
+  }
+
+  const el = document.getElementById('sf-editor-body');
+  if (el) {
+    el.style.minHeight = '';
+    el.style.alignItems = '';
+    el.style.justifyContent = '';
+    el.innerHTML = `<textarea id="sf-editor-ta"
+      style="width:100%;height:65vh;font-family:'JetBrains Mono',monospace;font-size:12px;
+             line-height:1.6;padding:10px;background:var(--bg);color:var(--text);
+             border:1px solid var(--border);border-radius:6px;resize:none;
+             box-sizing:border-box;outline:none"
+      oninput="sfEditorCount()"
+      spellcheck="false">${escHtml(res.content || '')}</textarea>`;
+    sfEditorCount();
+    document.getElementById('sf-editor-ta')?.focus();
+  }
+}
+
+function sfEditorCount() {
+  const ta = document.getElementById('sf-editor-ta');
+  const el = document.getElementById('sf-editor-chars');
+  if (ta && el) el.textContent = `字符数：${ta.value.length.toLocaleString()}`;
+}
+
+async function sfEditorSave(fileId) {
+  const ta = document.getElementById('sf-editor-ta');
+  const btn = document.getElementById('sf-editor-save');
+  if (!ta || !btn) return;
+  const content = ta.value;
+  if (content.length > 1048576) { sfToast('内容超过 1MB，无法保存'); return; }
+  const orig = btn.textContent;
+  btn.textContent = '保存中…'; btn.disabled = true;
+  try {
+    await api('PUT', `/share/files/${fileId}/content`, { content });
+    sfLoadDir(_sf.dirID); // 刷新文件列表（更新大小显示）
+    const savedItem = window._sfEditorItem;
+    if (savedItem && (savedItem.name || '').toLowerCase().endsWith('.md')) {
+      // MD 文件保存后进入查看模式，让用户看到渲染效果
+      // 用最新内容更新 item 的 size（近似），然后打开查看器
+      savedItem._cachedContent = content; // 缓存内容避免重复请求
+      sfOpenViewerWithContent(savedItem, content);
+    } else {
+      sfCloseModal();
+      sfToast('✓ 已保存：' + (savedItem?.name || ''));
+    }
+  } catch(e) {
+    sfToast('保存失败：' + e.message);
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
+
+
+// sfOpenViewerWithContent：用已有内容直接打开查看器（保存后跳转用，不重新 GET）
+async function sfOpenViewerWithContent(item, content) {
+  sfShowFileModal(`
+    <span style="font-size:16px;flex-shrink:0">${sfFileIcon(item.mime_type, item.name)}</span>
+    <span style="font-size:14px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(item.name)}</span>
+    ${_sf.canWrite && sfIsTextFile(item) ? `<button onclick="sfOpenEditor(window._sfViewerItem)" title="编辑此文件" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:15px;padding:2px 6px;color:var(--accent);line-height:1">✏️</button>` : ''}
+    <button onclick="sfCloseModal()" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:0 2px;margin-left:4px" title="关闭">✕</button>
+  `,
+  `<div id="sf-viewer-body"></div>`);
+  window._sfViewerItem = item;
+
+  const name = (item.name || '').toLowerCase();
+  let bodyHtml = '';
+  if (name.endsWith('.md')) {
+    bodyHtml = await sfRenderMarkdown(content);
+    document.getElementById('sf-viewer-body').innerHTML =
+      `<div class="sf-md-body" style="line-height:1.7;color:var(--text);max-width:100%;overflow-x:auto">${bodyHtml}</div>`;
+  } else {
+    document.getElementById('sf-viewer-body').innerHTML =
+      `<pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--text)">${escHtml(content)}</pre>`;
+  }
+  sfToast('✓ 已保存：' + item.name);
+}
+
+// Markdown 渲染（按需从 CDN 加载 marked.js）
+async function sfRenderMarkdown(text) {
+  if (!window.marked) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js';
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  return window.marked.parse(text);
+}
+
+// 通用文件弹窗（查看器/编辑器共用）
+function sfShowFileModal(headerHtml, bodyHtml, footerHtml) {
+  // 使用网盘自己的 sfModal 系统（sf-modal-overlay），
+  // 不用全局 showModal，避免关闭按钮失效和 loadPage() 触发问题
+  document.getElementById('sf-modal-overlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'sf-modal-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:8000;display:flex;align-items:center;justify-content:center;padding:16px';
+  const footer = footerHtml
+    ? `<div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;flex-shrink:0">${footerHtml}</div>` : '';
+  ov.innerHTML = `
+    <div style="background:var(--bg2);border-radius:12px;width:min(1080px,96vw);max-height:92vh;
+                display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);flex-shrink:0;
+                  display:flex;align-items:center;gap:10px;min-width:0">
+        ${headerHtml}
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px 20px">${bodyHtml}</div>
+      ${footer}
+    </div>`;
+  // 点击背景不关闭（查看器/编辑器内容较多，防止误触丢失编辑内容）
+  document.body.appendChild(ov);
+}
+
 function sfFileIcon(mime, name) {
   if (!mime) mime='';
   const n=(name||'').toLowerCase();
@@ -12413,18 +12993,20 @@ function bkIsPage(b) {
 }
 
 function bkIcon(b) {
-  // 用户设置的图标最优先（包括页面类型用户自定义的图标）
-  if (b.icon && b.icon.trim()) return escHtml(b.icon);
+  // 用户设置的图标最优先（emoji）
+  if (b.icon && b.icon.trim() && !b.icon.startsWith('/')) return escHtml(b.icon);
   // 页面类型默认图标
   if (bkIsPage(b)) return '📄';
-  // 普通书签：尝试拉取 favicon
-  const domain = (() => { try { return new URL(b.url).hostname; } catch(e) { return ''; } })();
-  if (!domain) return '🌐';
-  const fallback = BK_EMOJIS[Math.abs(b.id * 7) % BK_EMOJIS.length];
-  return `<img src="https://www.google.com/s2/favicons?domain=${domain}&sz=32"
-    style="width:32px;height:32px;border-radius:6px;object-fit:contain"
-    onerror="this.outerHTML='${fallback}'"
-    loading="lazy">`;
+  // 后端保存时已拉取并存入本地路径（如 /data/favicons/github.com.png）
+  if (b.icon && b.icon.startsWith('/')) {
+    const fallback = BK_EMOJIS[Math.abs(b.id * 7) % BK_EMOJIS.length];
+    return `<img src="${escHtml(b.icon)}"
+      style="width:32px;height:32px;border-radius:6px;object-fit:contain"
+      onerror="this.outerHTML='${fallback}'"
+      loading="lazy">`;
+  }
+  // icon 为空（拉取失败）：显示随机 emoji 兜底
+  return BK_EMOJIS[Math.abs(b.id * 7) % BK_EMOJIS.length];
 }
 
 // ── 拖拽排序 ──────────────────────────────────────────────────
@@ -12643,13 +13225,32 @@ async function bkSave(id) {
   const payload = { name, url: finalUrl, category: cat, icon, remark, is_page: 0,
                     sort_order: id ? (_bkList.find(b=>b.id===id)?.sort_order||0) : _bkList.length };
   try {
-    if (id) {
-      await api('PUT', `/bookmarks/${id}`, payload);
-    } else {
-      await api('POST', '/bookmarks', payload);
-    }
+    // 后端保存时会拉取 favicon，可能较慢；用 2 秒超时：
+    // 超时到了直接关窗口，图标等下次刷新再显示；未超时则用返回的 icon 即时更新内存。
+    const timeout = new Promise(resolve => setTimeout(() => resolve(null), 2000));
+    const request = id
+      ? api('PUT', `/bookmarks/${id}`, payload)
+      : api('POST', '/bookmarks', payload);
+    const res = await Promise.race([request, timeout]);
     closeModal();
-    await bkReload();
+    if (res && res.ok) {
+      if (id) {
+        // 编辑：就地更新内存，用服务端返回的 icon（含抓取结果）
+        const b = _bkList.find(x => x.id === id);
+        if (b) {
+          b.icon = res.icon ?? b.icon;
+          b.name = name; b.url = finalUrl; b.category = cat; b.remark = remark;
+        }
+        bkRenderCats();
+        bkRender();
+      } else {
+        // 新增：从服务端刷新列表（需要拿到新 id）
+        await bkReload();
+      }
+    } else {
+      // 超时或无响应：直接刷新列表，图标以数据库里实际存的为准
+      await bkReload();
+    }
   } catch(e) { alert('保存失败：' + e.message); }
 }
 
@@ -14293,6 +14894,12 @@ async function loadAppCenter(content, actions) {
             background:${_acView==='db'?'rgba(88,166,255,.15)':''}; color:${_acView==='db'?'var(--accent)':'var(--text2)'}">
             🗄️ 数据库管理
           </div>
+          <div id="ac-nav-filemgr" onclick="acSetView('filemgr')"
+            class="ac-nav-item" style="padding:9px 14px;cursor:pointer;display:flex;align-items:center;
+            gap:8px;font-size:13px;border-radius:6px;margin:1px 6px;
+            background:${_acView==='filemgr'?'rgba(88,166,255,.15)':''}; color:${_acView==='filemgr'?'var(--accent)':'var(--text2)'}">
+            📁 文件管理
+          </div>
           <div id="ac-nav-groups" onclick="acSetView('groups')"
             class="ac-nav-item" style="padding:9px 14px;cursor:pointer;display:flex;align-items:center;
             gap:8px;font-size:13px;border-radius:6px;margin:1px 6px;
@@ -14314,7 +14921,7 @@ async function loadAppCenter(content, actions) {
 
 function acSetView(v) {
   _acView = v;
-  ['apps','db','groups'].forEach(id => {
+  ['apps','db','filemgr','groups'].forEach(id => {
     const el = document.getElementById('ac-nav-' + id);
     if (!el) return;
     const active = id === v;
@@ -14332,6 +14939,8 @@ async function acRenderMain() {
     acRenderAppsView();
   } else if (_acView === 'groups') {
     await acLoadGroupsView();
+  } else if (_acView === 'filemgr') {
+    await acFileMgrRender();
   } else {
     await acLoadTables();
     acRenderDbView();
@@ -14561,6 +15170,274 @@ async function acDeleteApp(id) {
   acRenderAppCards();
 }
 
+
+// ── 文件管理视图 ──────────────────────────────────────────────
+let _fmPage = 1, _fmPageSize = 50, _fmTotal = 0;
+let _fmFilterExt = '', _fmFilterUID = '', _fmFilterQ = '';
+let _fmConfig = null, _fmBuiltinWL = [], _fmBuiltinBL = [];
+let _fmUsers = [];
+
+async function acFileMgrRender() {
+  const main = document.getElementById('ac-main');
+  if (!main) return;
+  main.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;gap:0">
+      <!-- 上方：配置卡片 -->
+      <div id="fm-config-panel" style="flex-shrink:0;background:var(--bg2);border:1px solid var(--border);
+        border-radius:10px;padding:16px 20px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <div style="font-weight:600;font-size:14px">⚙️ 上传配置</div>
+          <button class="btn btn-primary btn-sm" onclick="fmSaveConfig()">保存配置</button>
+        </div>
+        <div id="fm-config-body" style="color:var(--text3);font-size:13px">加载中…</div>
+      </div>
+      <!-- 下方：文件列表 -->
+      <div style="flex:1;display:flex;flex-direction:column;min-height:0;background:var(--bg2);
+        border:1px solid var(--border);border-radius:10px;padding:16px 20px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <span style="font-weight:600;font-size:14px">📁 上传文件</span>
+          <input id="fm-q" placeholder="文件名搜索…" style="flex:1;min-width:120px;max-width:200px;
+            background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+            padding:5px 10px;font-size:12px;color:var(--text)" oninput="fmReload()">
+          <select id="fm-ext" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+            padding:5px 8px;font-size:12px;color:var(--text)" onchange="fmReload()">
+            <option value="">全部类型</option>
+            <option>.jpg</option><option>.png</option><option>.pdf</option>
+            <option>.xlsx</option><option>.docx</option><option>.zip</option><option>.mp4</option>
+          </select>
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-sm" onclick="fmGCPreview()" style="color:var(--yellow)">🔍 预览空闲文件</button>
+            <button class="btn btn-sm" onclick="fmGCRun()" style="color:var(--red)">🗑️ 清空空闲文件</button>
+          </div>
+        </div>
+        <div style="flex:1;overflow-y:auto;min-height:0">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="background:var(--bg3);position:sticky;top:0;z-index:1">
+                <th style="padding:8px 10px;text-align:left;color:var(--text3);border-bottom:1px solid var(--border)">文件名</th>
+                <th style="padding:8px 10px;text-align:left;color:var(--text3);border-bottom:1px solid var(--border)">类型</th>
+                <th style="padding:8px 10px;text-align:right;color:var(--text3);border-bottom:1px solid var(--border)">大小</th>
+                <th style="padding:8px 10px;text-align:left;color:var(--text3);border-bottom:1px solid var(--border)">上传人</th>
+                <th style="padding:8px 10px;text-align:left;color:var(--text3);border-bottom:1px solid var(--border)">上传时间</th>
+                <th style="padding:8px 10px;text-align:center;color:var(--text3);border-bottom:1px solid var(--border)">操作</th>
+              </tr>
+            </thead>
+            <tbody id="fm-tbody"><tr><td colspan="6" style="padding:30px;text-align:center;color:var(--text3)">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="fm-pager" style="display:flex;align-items:center;justify-content:flex-end;gap:10px;
+          margin-top:10px;font-size:12px;color:var(--text3)"></div>
+      </div>
+    </div>`;
+
+  // 并行加载配置 + 用户列表 + 文件列表
+  [_fmConfig, _fmUsers] = await Promise.all([
+    api('GET', '/plus/upload-mgr/config'),
+    api('GET', '/users/simple').then(r => Array.isArray(r) ? r : []),
+  ]);
+  _fmBuiltinWL = (_fmConfig.builtin_whitelist || []).sort();
+  _fmBuiltinBL = (_fmConfig.builtin_blacklist || []).sort();
+  fmRenderConfig();
+  await fmLoadFiles();
+}
+
+function fmRenderConfig() {
+  const cfg = (_fmConfig || {}).config || {};
+  const wl = cfg['upload.whitelist'] || '';
+  const bl = cfg['upload.blacklist'] || '';
+  const maxMb = cfg['upload.max_size_mb'] || '20';
+
+  document.getElementById('fm-config-body').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;align-items:start">
+      <div>
+        <label style="display:block;font-size:11px;color:var(--text3);margin-bottom:4px">最大文件大小（MB）</label>
+        <input id="fm-max-mb" type="number" min="1" max="2048" value="${escHtml(maxMb)}"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+                 padding:6px 10px;font-size:13px;color:var(--text)">
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">范围：1 ~ 2048 MB</div>
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;color:var(--text3);margin-bottom:4px">
+          白名单扩展名
+          <span style="color:var(--text3);font-weight:400">（空=使用系统默认）</span>
+        </label>
+        <input id="fm-wl" placeholder=".jpg,.png,.pdf,__no_ext__ …" value="${escHtml(wl)}"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+                 padding:6px 10px;font-size:13px;color:var(--text)">
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">
+          系统默认（始终生效）：${_fmBuiltinWL.join(' ')}<br>填 <code style="color:var(--accent)">__no_ext__</code> 可允许上传无扩展名文件
+        </div>
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;color:var(--text3);margin-bottom:4px">
+          追加黑名单扩展名
+          <span style="color:var(--text3);font-weight:400">（与系统黑名单合并）</span>
+        </label>
+        <input id="fm-bl" placeholder=".svg,.html …" value="${escHtml(bl)}"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+                 padding:6px 10px;font-size:13px;color:var(--text)">
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">
+          系统固定黑名单：${_fmBuiltinBL.join(' ')}
+        </div>
+      </div>
+    </div>`;
+}
+
+function fmToast(msg, isErr) {
+  const t = document.createElement('div');
+  t.style.cssText = `position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
+    background:${isErr?'#c62828':'#1a7f37'};color:#fff;padding:9px 22px;
+    border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.3)`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+async function fmSaveConfig() {
+  const maxMb = document.getElementById('fm-max-mb')?.value?.trim() || '20';
+  const wl    = document.getElementById('fm-wl')?.value?.trim() || '';
+  const bl    = document.getElementById('fm-bl')?.value?.trim() || '';
+  await api('PUT', '/plus/upload-mgr/config', {
+    'upload.max_size_mb': maxMb,
+    'upload.whitelist':   wl,
+    'upload.blacklist':   bl,
+  });
+  fmToast('配置已保存');
+}
+
+async function fmReload() {
+  _fmPage = 1;
+  await fmLoadFiles();
+}
+
+async function fmLoadFiles() {
+  const q   = document.getElementById('fm-q')?.value || '';
+  const ext = document.getElementById('fm-ext')?.value || '';
+  const params = new URLSearchParams({ page: _fmPage, page_size: _fmPageSize });
+  if (q)   params.set('q',   q);
+  if (ext) params.set('ext', ext);
+  const res = await api('GET', '/plus/upload-mgr/files?' + params.toString());
+  _fmTotal = res.total || 0;
+  fmRenderTable(res.data || []);
+  fmRenderPager();
+}
+
+function fmUserName(uid) {
+  const u = _fmUsers.find(u => u.id === uid);
+  return u ? u.full_name : `#${uid}`;
+}
+
+function fmFmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function fmRenderTable(files) {
+  const tbody = document.getElementById('fm-tbody');
+  if (!tbody) return;
+  if (!files.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="padding:40px;text-align:center;color:var(--text3)">暂无文件</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = files.map((f, i) => `
+    <tr style="background:${i%2===0?'':'var(--bg3)'}">
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border)">
+        <a href="/plus/upload/${escHtml(f.file_path)}" target="_blank"
+           style="color:var(--accent);text-decoration:none;font-family:monospace;font-size:11px"
+           title="${escHtml(f.file_path)}">${escHtml(f.file_name)}</a>
+      </td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text3)">${escHtml(f.ext)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border);text-align:right;color:var(--text2)">${fmFmtSize(f.file_size)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text2)">${escHtml(fmUserName(f.user_id))}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border);color:var(--text3);font-size:11px">${escHtml((f.uploaded_at||'').slice(0,16))}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--border);text-align:center">
+        <button onclick="fmDeleteFile(${f.id},'${escHtml(f.file_name)}')"
+          style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;opacity:.6"
+          onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.6'"
+          title="删除">🗑</button>
+      </td>
+    </tr>`).join('');
+}
+
+function fmRenderPager() {
+  const pager = document.getElementById('fm-pager');
+  if (!pager) return;
+  const pages = Math.ceil(_fmTotal / _fmPageSize) || 1;
+  pager.innerHTML = `
+    <span>共 ${_fmTotal} 个文件</span>
+    <button class="btn btn-sm" onclick="fmGotoPage(${_fmPage-1})" ${_fmPage<=1?'disabled':''}>‹ 上一页</button>
+    <span>${_fmPage} / ${pages}</span>
+    <button class="btn btn-sm" onclick="fmGotoPage(${_fmPage+1})" ${_fmPage>=pages?'disabled':''}>下一页 ›</button>`;
+}
+
+async function fmGotoPage(p) {
+  const pages = Math.ceil(_fmTotal / _fmPageSize) || 1;
+  if (p < 1 || p > pages) return;
+  _fmPage = p;
+  await fmLoadFiles();
+}
+
+async function fmDeleteFile(id, name) {
+  if (!confirm(`确认删除文件「${name}」？此操作将同时删除磁盘文件，不可恢复！`)) return;
+  await api('DELETE', `/plus/upload-mgr/files/${id}`);
+  fmToast('已删除');
+  await fmLoadFiles();
+}
+
+async function fmGCPreview() {
+  const res = await api('GET', '/plus/upload-mgr/gc/preview');
+  const list = res.orphans || [];
+  const totalBytes = res.total_bytes || 0;
+  if (!list.length) {
+    acShowModal(`<div class="modal" style="max-width:460px">
+      <div class="modal-header">🔍 空闲文件预览<span class="modal-close" onclick="acCloseModal()">×</span></div>
+      <div class="modal-body" style="padding:30px;text-align:center;color:var(--text3)">
+        <div style="font-size:32px;margin-bottom:10px">✅</div>
+        <div>没有需要清理的空闲文件</div>
+        <div style="font-size:12px;margin-top:6px">（条件：上传超过 24 小时且未被任何表引用）</div>
+      </div>
+      <div class="modal-footer"><button class="btn" onclick="acCloseModal()">关闭</button></div>
+    </div>`);
+    return;
+  }
+  const rows = list.map(f => `
+    <tr>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);font-family:monospace;font-size:11px;color:var(--text2)">${escHtml(f.file_name)}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;color:var(--text3)">${fmFmtSize(f.file_size)}</td>
+    </tr>`).join('');
+  acShowModal(`<div class="modal" style="max-width:560px;max-height:80vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      🔍 空闲文件预览（${list.length} 个，共 ${fmFmtSize(totalBytes)}）
+      <span class="modal-close" onclick="acCloseModal()">×</span>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;flex:1">
+      <div style="font-size:12px;color:var(--yellow);margin-bottom:10px;padding:8px 12px;background:rgba(255,200,0,.08);border-radius:6px">
+        ⚠️ 以下文件上传超过 24 小时且在所有数据表中未被引用，执行清空后将永久删除磁盘文件。
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:var(--bg3)">
+          <th style="padding:7px 10px;text-align:left;color:var(--text3)">文件名</th>
+          <th style="padding:7px 10px;text-align:right;color:var(--text3)">大小</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="modal-footer" style="flex-shrink:0;gap:8px">
+      <button class="btn" onclick="acCloseModal()">关闭</button>
+      <button class="btn btn-danger" onclick="acCloseModal();fmGCRun()">立即清空</button>
+    </div>
+  </div>`);
+}
+
+async function fmGCRun() {
+  if (!confirm(`确认清空所有空闲文件？此操作将删除磁盘文件，不可恢复！`)) return;
+  const res = await api('POST', '/plus/upload-mgr/gc');
+  const freed = fmFmtSize(res.freed_bytes || 0);
+  fmToast(`已清理 ${res.deleted || 0} 个文件，释放 ${freed}`);
+  await fmLoadFiles();
+}
+
 // ── 数据库管理视图 ────────────────────────────────────────────
 async function acLoadTables() {
   const res = await api('GET', '/plus/tables');
@@ -14575,6 +15452,7 @@ function acRenderDbView() {
     <div style="display:flex;flex-direction:column;height:100%;gap:12px">
       <div style="flex-shrink:0;display:flex;gap:8px;justify-content:flex-end">
         <button class="btn btn-primary btn-sm" onclick="acNewTable()">⊞ 新建数据表</button>
+        <button class="btn btn-sm" onclick="acFromDDL()">📝 DDL 创建</button>
         <button class="btn btn-sm" onclick="acFromExcel()">📥 从Excel创建</button>
       </div>
       <div style="flex:1;overflow-y:auto">
@@ -14729,6 +15607,183 @@ async function acSaveTable(existingName) {
     }
   } catch(e) {
     alert('保存失败: ' + (e.message || e));
+  }
+}
+
+// ── DDL 创建表 ────────────────────────────────────────────────
+function acFromDDL() {
+  const placeholder = `-- 示例（系统自动补充 id / created_by / created_at / updated_at）
+CREATE TABLE hr_invoice (
+  date    TEXT NOT NULL COMMENT '报销日期',
+  name    TEXT NOT NULL COMMENT '报销人',
+  amount  REAL NOT NULL COMMENT '金额',
+  desc    TEXT         COMMENT '备注'
+);`;
+
+  acShowModal(`<div class="modal" style="max-width:680px;width:95vw">
+    <div class="modal-header">📝 DDL 创建数据表<span class="modal-close" onclick="acDismissModal()">×</span></div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px;line-height:1.7">
+        粘贴 <code style="color:var(--accent)">CREATE TABLE</code> 语句，系统自动解析字段。
+        支持 <code style="color:var(--accent)">TEXT / REAL / INTEGER / DATE / DATETIME</code> 类型；
+        使用 <code style="color:var(--accent)">COMMENT '...'</code> 或行尾 <code style="color:var(--accent)">-- ...</code> 作为字段显示名。
+        <br>系统字段（id / created_by / created_at / updated_at）无需填写，自动添加。
+      </div>
+      <textarea id="ac-ddl-input" rows="12" placeholder="${escHtml(placeholder)}"
+        style="width:100%;box-sizing:border-box;background:var(--bg1);border:1px solid var(--border);
+               border-radius:6px;color:var(--text);font-family:'JetBrains Mono','Fira Code',monospace;
+               font-size:13px;line-height:1.7;padding:10px 12px;resize:vertical"></textarea>
+      <div id="ac-ddl-preview" style="margin-top:10px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="acDismissModal()">取消</button>
+      <button class="btn btn-sm" onclick="acPreviewDDL()">👁 预览解析</button>
+      <button class="btn btn-primary" onclick="acConfirmDDL()">创建</button>
+    </div>
+  </div>`);
+}
+
+// 解析 DDL → {name, label, fields[]}
+function parseDDL(ddl) {
+  // 去掉注释行（-- 开头整行）保留行尾注释
+  const lines = ddl.split('\n');
+
+  // 找 CREATE TABLE name (
+  let tableName = '';
+  const createMatch = ddl.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`']?(\w+)["`']?\s*\(/i);
+  if (!createMatch) throw new Error('未找到 CREATE TABLE 语句');
+  tableName = createMatch[1].toLowerCase();
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(tableName)) {
+    throw new Error(`表名 "${tableName}" 不符合规则（小写字母/数字/下划线，字母开头）`);
+  }
+
+  // 提取括号内的内容
+  const parenStart = ddl.indexOf('(', createMatch.index);
+  const parenEnd   = ddl.lastIndexOf(')');
+  if (parenStart < 0 || parenEnd < 0) throw new Error('未找到字段定义括号');
+  const body = ddl.slice(parenStart + 1, parenEnd);
+
+  // 跳过的系统字段名
+  const systemCols = new Set(['id','created_by','created_at','updated_at']);
+
+  // 映射 SQL 类型 → app 类型
+  const mapType = t => {
+    t = t.toUpperCase();
+    if (t.includes('INT'))                          return 'number';
+    if (t.includes('REAL') || t.includes('FLOAT') ||
+        t.includes('DOUBLE') || t.includes('NUMERIC') ||
+        t.includes('DECIMAL'))                      return 'number';
+    if (t === 'DATE')                               return 'date';
+    if (t.includes('DATETIME') || t.includes('TIMESTAMP')) return 'datetime';
+    return 'text';
+  };
+
+  const fields = [];
+  // 逐行解析，跳过 CONSTRAINT / PRIMARY KEY / INDEX / KEY / UNIQUE 等
+  const colLines = body.split('\n');
+  for (let rawLine of colLines) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith('--')) continue;
+
+    // 提取行尾 -- comment 或 COMMENT '...'  作为显示名
+    let displayName = '';
+    const commentMatch = line.match(/--\s*(.+)$/);
+    if (commentMatch) {
+      displayName = commentMatch[1].trim();
+      line = line.slice(0, commentMatch.index).trim();
+    }
+    const comMatch = line.match(/COMMENT\s+['"]([^'"]+)['"]/i);
+    if (comMatch) {
+      if (!displayName) displayName = comMatch[1].trim();
+      line = line.replace(comMatch[0], '').trim();
+    }
+
+    // 跳过约束行
+    if (/^(CONSTRAINT|PRIMARY\s+KEY|UNIQUE|INDEX|KEY|CHECK|FOREIGN\s+KEY)/i.test(line)) continue;
+
+    // 去掉行尾逗号
+    line = line.replace(/,\s*$/, '').trim();
+    if (!line) continue;
+
+    // 解析列名和类型
+    const parts = line.match(/^["`']?(\w+)["`']?\s+(\w+)/);
+    if (!parts) continue;
+    const colName = parts[1].toLowerCase();
+    const colType = parts[2];
+
+    if (systemCols.has(colName)) continue; // 跳过系统字段
+
+    const required = /NOT\s+NULL/i.test(line) && !/DEFAULT/i.test(line);
+    fields.push({
+      name:     displayName || colName,
+      type:     mapType(colType),
+      required: required,
+    });
+  }
+
+  if (!fields.length) throw new Error('未解析到任何有效字段（已自动跳过系统字段）');
+  return { name: tableName, fields };
+}
+
+function acPreviewDDL() {
+  const ddl = document.getElementById('ac-ddl-input')?.value.trim();
+  const preview = document.getElementById('ac-ddl-preview');
+  if (!ddl || !preview) return;
+  try {
+    const { name, fields } = parseDDL(ddl);
+    const typeLabel = { text:'文本', number:'数字', date:'日期', datetime:'日期时间' };
+    preview.innerHTML = `
+      <div style="background:var(--bg3);border-radius:8px;padding:12px 14px">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:8px">
+          ✅ 解析成功 — 表名：<code style="color:var(--accent)">${escHtml(name)}</code>，共 ${fields.length} 个字段
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="color:var(--text3)">
+            <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">字段 ID</th>
+            <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">显示名</th>
+            <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">类型</th>
+            <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">必填</th>
+          </tr></thead>
+          <tbody>${fields.map((f,i) => `<tr>
+            <td style="padding:4px 8px;color:var(--accent)">f_${i}</td>
+            <td style="padding:4px 8px;color:var(--text)">${escHtml(f.name)}</td>
+            <td style="padding:4px 8px;color:var(--text2)">${typeLabel[f.type]||f.type}</td>
+            <td style="padding:4px 8px;color:${f.required?'var(--green)':'var(--text3)'}">${f.required?'✓':'-'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px">
+          系统字段自动添加：id（主键）· created_by（创建人）· created_at · updated_at
+        </div>
+      </div>`;
+  } catch(e) {
+    preview.innerHTML = `<div style="color:var(--red);font-size:13px;padding:8px">❌ ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function acConfirmDDL() {
+  const ddl = document.getElementById('ac-ddl-input')?.value.trim();
+  if (!ddl) { alert('请输入 DDL 语句'); return; }
+  let parsed;
+  try {
+    parsed = parseDDL(ddl);
+  } catch(e) {
+    alert('DDL 解析失败：' + e.message);
+    return;
+  }
+
+  // 显示名默认和表名相同，用户可在弹窗中预览；直接提交
+  try {
+    await api('POST', '/plus/tables', {
+      name:   parsed.name,
+      label:  parsed.name,   // 显示名默认同表名，用户可后续通过⚙️表结构修改
+      description: '',
+      fields: parsed.fields,
+    });
+    acDismissModal();
+    await acLoadTables();
+    acRenderTableCards();
+  } catch(e) {
+    alert('创建失败：' + (e.message || e));
   }
 }
 
@@ -14919,6 +15974,7 @@ function acShowTableInfo(t) {
     { method: 'POST',   color: '#3fb950', path: `${baseUrl}/rows`,          desc: '新增一行',       body: exampleBody },
     { method: 'PUT',    color: '#d29922', path: `${baseUrl}/rows/{id}`,     desc: '修改一行',       body: exampleBody },
     { method: 'DELETE', color: '#f85149', path: `${baseUrl}/rows/{id}`,     desc: '删除一行',       body: '' },
+    { method: 'GET',    color: '#58a6ff', path: `${baseUrl}/rows/{id}`,     desc: '查询单行',       body: '' },
     { method: 'GET',    color: '#bc8cff', path: `${host}/api/plus/templates?table_name=${t.name}`, desc: '获取模板列表',
       body: `// 返回示例：\n{\n  "templates": [\n    { "id": 1, "name": "月报", "file_type": "xlsx", "table_name": "${t.name}" },\n    { "id": 2, "name": "通用模板", "file_type": "html", "table_name": "" }\n  ]\n}` },
     { method: 'POST',   color: '#bc8cff', path: `${baseUrl}/export?template_id={id}`, desc: '用模板导出数据（xlsx/docx）',
@@ -14929,6 +15985,19 @@ function acShowTableInfo(t) {
       body: `// 所有登录用户可访问，用于将 created_by 映射为姓名\n// 返回：[{"id":1,"full_name":"张三"},{"id":2,"full_name":"李四"},...]\n// 示例：\nconst users = await fetch('${host}/api/users/simple', {\n  headers: { Authorization: 'Bearer ' + token }\n}).then(r => r.json());\nconst name = uid => users.find(u => u.id === uid)?.full_name || \`#\${uid}\`;` },
     { method: 'GET',    color: '#e8b84b', path: `${host}/api/users/self`, desc: '获取当前登录用户完整信息',
       body: `// 所有登录用户可访问，返回当前用户全部字段（除密码）\n// 返回示例：\n{\n  "id": 1,\n  "username": "zhangsan",\n  "full_name": "张三",\n  "email": "z@company.com",\n  "department": "技术部",\n  "position": "工程师",\n  "level": "P4",\n  "is_admin": false,\n  "permissions": "{\\"products\\":true}",\n  "employee_id": "EMP001",  // 未填时自动使用数据库 ID\n  "created_at": "2024-01-01 10:00:00"\n}\n// 示例：\nconst me = await fetch('${host}/api/users/self', {\n  headers: { Authorization: 'Bearer ' + token }\n}).then(r => r.json());` },
+    // ── 新增接口 ──────────────────────────────────────────────
+    { method: 'GET',    color: '#58a6ff', path: `${baseUrl}/rows/{id}`,     desc: '查询单行' ,
+      body: `// 返回示例：\n{ "data": { "id": 1, ${fields.slice(0,2).map(f=>`"${f.id}": "..."`).join(', ')}, "created_by": 1, "created_at": "..." } }` },
+    { method: 'POST',   color: '#3fb950', path: `${baseUrl}/rows/batch`,    desc: '批量新增（最多 500 行）',
+      body: `{\n  "rows": [\n    { ${fields.slice(0,2).map(f=>`"${f.id}": ${f.type==='number'?'0':'"..."'}`).join(', ')} },\n    { ${fields.slice(0,2).map(f=>`"${f.id}": ${f.type==='number'?'1':'"..."'}`).join(', ')} }\n  ]\n}\n// 返回：{ "ok": true, "inserted": 2, "ids": [101, 102] }\n// 任一行失败 → 整体回滚，返回出错行索引` },
+    { method: 'PUT',    color: '#d29922', path: `${baseUrl}/rows/batch`,    desc: '批量更新（最多 500 行，每行须带 id）',
+      body: `{\n  "rows": [\n    { "id": 5,  ${fields.slice(0,1).map(f=>`"${f.id}": ${f.type==='number'?'99':'"新值"'}`).join(', ')} },\n    { "id": 12, ${fields.slice(0,1).map(f=>`"${f.id}": ${f.type==='number'?'88':'"其他"'}`).join(', ')} }\n  ]\n}\n// 返回：{ "ok": true, "updated": 2 }\n// 权限按 user_edit_all / user_edit_own 逐行校验，事务保证原子性` },
+    { method: 'DELETE', color: '#f85149', path: `${baseUrl}/rows/batch`,    desc: '批量删除（最多 500 条）',
+      body: `{\n  "ids": [5, 12, 33]\n}\n// 返回：{ "ok": true, "deleted": 3 }\n// 权限校验同单行删除，事务保证原子性` },
+    { method: 'POST',   color: '#bc8cff', path: `${baseUrl}/query/join`,    desc: '主表 + 关联表 JOIN 查询（最多 3 个 JOIN）',
+      body: `{\n  "joins": [\n    {\n      "table": "other_table",      // 关联的 plus 表名\n      "on":    "customer_id=id",  // 主表字段=关联表字段\n      "type":  "LEFT",            // LEFT（默认）或 INNER\n      "fields": ["name", "phone"] // 只取关联表的这几列\n    }\n  ],\n  "filters": [],\n  "sort_by": "id",\n  "sort_dir": "desc",\n  "page": 1,\n  "page_size": 50\n}\n// 关联表列在返回 data 中以 "other_table__name" 形式命名\n// 关联表独立校验读权限，字段白名单防注入` },
+    { method: 'GET',    color: '#bc8cff', path: `${baseUrl}/export/raw`,    desc: '原生 Excel 导出（不依赖模板，上限 10000 行）',
+      body: `// Query 参数（均可选）：\n//   filters  = URL编码的 JSON 筛选条件\n//   logic    = AND（默认）| OR\n//   sort_by  = 排序字段（默认 id）\n//   sort_dir = desc（默认）| asc\n// 响应：二进制 xlsx 文件流（触发下载）\n// 超过 10000 行时文件名自动追加 _前10000条\n// 数字列自动应用千分位数字格式，首行冻结` },
   ];
 
   acShowModal(`<div class="modal" style="max-width:780px;width:96vw;max-height:90vh;display:flex;flex-direction:column">
@@ -15046,7 +16115,7 @@ function acBuildPrompt(t, fields, apis, ddl) {
     `  - ${f.id} (${f.type==='number'?'REAL':'TEXT'})：${f.name}${f.required?' [必填]':''}`
   ).join('\n');
   const host = window.location.origin;
-  return `## 数据表：app_${t.name}（${t.label}）
+  return `### 写前端\n 根据下面内容开始写前端H5单页程序\n## 数据表：app_${t.name}（${t.label}）
 ${t.description ? '\n描述：' + t.description + '\n' : ''}
 ### 数据库
 - 文件：data/db/plus.db（SQLite）
@@ -15067,7 +16136,7 @@ ${fieldDesc}
 
 1. 查询数据
    POST /query
-   Body: { "q": "", "sort_by": "id", "sort_dir": "desc", "page": 1, "page_size": 50 }
+   Body: { "fields":"[]","q": "搜索关键词", "sort_by": "id", "sort_dir": "desc", "page": 1, "page_size": 50 }
    返回: { "data": [...], "total": N, "fields": [...] }
 
 2. 新增一行（系统自动记录 created_by = 当前登录用户 ID）
@@ -15083,6 +16152,52 @@ ${fieldDesc}
 4. 删除一行
    DELETE /rows/{id}
    返回: { "ok": true }
+
+5. 查询单行
+   GET /rows/{id}
+   返回: { "data": { "id": N, ... } }
+
+6. 批量新增（事务，最多 500 行，任一失败整体回滚）
+   POST /rows/batch
+   Body: { "rows": [ {"field_id": value, ...}, ... ] }
+   返回: { "ok": true, "inserted": N, "ids": [101, 102, ...] }
+
+7. 批量更新（事务，最多 500 行，每行须包含 id）
+   PUT /rows/batch
+   Body: { "rows": [ {"id": 5, "field_id": value}, ... ] }
+   返回: { "ok": true, "updated": N }
+   权限：user_edit_all 可改所有行；user_edit_own 只能改自己创建的行
+
+8. 批量删除（事务，最多 500 条）
+   DELETE /rows/batch
+   Body: { "ids": [5, 12, 33] }
+   返回: { "ok": true, "deleted": N }
+
+9. 主表 + 关联表 JOIN 查询（最多 3 个 JOIN）
+   POST /query/join
+   Body:
+   {
+     "joins": [
+       {
+         "table":  "other_table",      // 关联 plus 表名
+         "on":     "my_fk_col=id",     // 主表字段=关联表字段
+         "type":   "LEFT",             // LEFT（默认）或 INNER
+         "fields": ["name","phone"]    // 只取关联表的这几列
+       }
+     ],
+     "filters": [], "logic": "AND",
+     "sort_by": "id", "sort_dir": "desc",
+     "page": 1, "page_size": 50
+   }
+   返回: { "data": [...], "total": N, "fields": [...] }
+   说明：关联表列以 "other_table__colid" 形式出现在 data 中；
+         关联表独立校验读权限；字段白名单防 SQL 注入
+
+10. 原生 Excel 导出（不依赖模板，上限 10000 行）
+    GET /export/raw?filters=[]&logic=AND&sort_by=id&sort_dir=desc
+    响应：二进制 xlsx 文件流（触发下载）
+    说明：超 10000 行时文件名追加 _前10000条；
+          数字列自动千分位格式；首行冻结；respects readOwnOnly 权限
 
 ### 用户信息接口（所有登录用户可访问）
 
@@ -15113,6 +16228,50 @@ ${fieldDesc}
    // me.employee_id → "EMP001"（或 "1"）
    // me.department → "技术部"
    // JSON.parse(me.permissions) → {"products": true, ...}
+
+### 文件上传接口
+
+| 属性 | 描述 |
+|------|------|
+| 请求方法 | POST |
+| 接口路径 | /api/plus/upload |
+| 功能描述 | 通用文件上传接口，支持多种文件类型的上传 |
+| 认证要求 | 需要有效的JWT令牌 |
+| 权限要求 | 已登录用户（无需额外权限） |
+| 请求体 | Multipart Form Data |
+
+| 字段名 | 类型 | 必填 | 描述 | 示例 |
+|--------|------|------|------|------|
+| file | File | 是 | 要上传的文件对象 | 选择本地文件 |
+
+
++ 成功响应格式
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| ok | boolean | 上传是否成功 |
+| file_name | string | 保存在服务器上的文件名:<timestamp>_<original_filename> |
+| file_url | string | 文件url访问完整路径<user_id>/file_name  |
+| file_size | integer | 文件大小（字节） |
+| user_id | integer | 上传用户的ID |
+
+
++ 错误响应格式
+
+{
+  "error": "未登录"
+}
+
+
+
++ 文件存储路径
+
+data/plus/upload/<user_id>/<timestamp>_<original_filename>
+
+
+###  访问上传文件
+
+GET /plus/res/file_url - 访问上传的文件
 
 ### 模板与导出 API
 
