@@ -42,6 +42,7 @@
  docker run -itd \
   --name my-erp-app \
   -p 8880:8080 \
+  -restart=always \
   -v $(pwd)/erp_data:/home/user/app/data \
   ghcr.io/cn4096/aerp:latest
   
