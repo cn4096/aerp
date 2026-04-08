@@ -20,6 +20,7 @@
  ## 数据保存在当前目录/claw_host_data 访问端口:8880
  docker run -itd \
   --name claw_host-app \
+  --restart=always \
   -p 8880:7860 \
   -v $(pwd)/claw_host_data:/home/user/app/data \
   ghcr.io/cn4096/claw_host:latest
@@ -41,8 +42,8 @@
  ## 数据保存在当前目录/erp_data 访问端口:8880
  docker run -itd \
   --name my-erp-app \
+  --restart=always \
   -p 8880:8080 \
-  -restart=always \
   -v $(pwd)/erp_data:/home/user/app/data \
   ghcr.io/cn4096/aerp:latest
   
