@@ -108,7 +108,7 @@ jobs:
         #   1. 访问 https://github.com/settings/tokens → Generate new token (classic)
         #   2. 勾选 write:packages 和 delete:packages 权限
         #   3. 将生成的 token 保存为仓库 secret，命名为 PAT
-        uses: snok/container-retention-policy@v3.0.0
+        uses: snok/container-retention-policy@v3.0.1
         with:
           account: user               # 个人账号固定填 user（不是用户名！），组织账号才填组织名
           token: ${{ secrets.PAT }}       # 必须用 PAT，GITHUB_TOKEN 无 delete:packages 权限
