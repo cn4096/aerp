@@ -48,3 +48,26 @@
   ghcr.io/cn4096/aerp:latest
   
 ```
+
+## uptime Docker启动
+
++ 测试：`docker run --rm --network host ghcr.io/cn4096/uptime-monitor:latest`   `端口`：3001
+
++ 数据保存到本地并运行：
+  
+```
+ ## 删除旧的容器，更新镜像
+ docker stop uptime-monitor ; docker rm uptime-monitor
+
+ ## 下载/更新镜像
+ docker pull ghcr.io/cn4096/uptime-monitor:latest
+
+ ## 数据保存在当前目录/data 访问端口:3001
+ docker run -itd \
+  --name uptime-monitor \
+  --restart=always \
+  -p 13001:3001 \
+  -v $(pwd)/uptime-monitor:/data \
+  ghcr.io/cn4096/uptime-monitor:latest
+  
+```
