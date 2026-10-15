@@ -5,8 +5,8 @@ on:
     branches: [ main ]
     paths:
       - 'Dockerfile'
-      - 'erp-linux-amd64-x64'
-      - 'erp-linux-arm64-arm64'
+      - 'uptime-monitor-linux-amd64'
+      - 'uptime-monitor-linux-arm64'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -49,7 +49,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/aerp:latest
+            ghcr.io/${{ github.repository_owner }}/uptime-monitor:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=HTTP Server
