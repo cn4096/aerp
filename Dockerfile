@@ -35,10 +35,10 @@ ls -la
 # 根据 TARGETPLATFORM 映射到实际的文件名
 case "$TARGETPLATFORM" in
   "linux/amd64")
-    FILE_PATTERN="erp-linux-amd64-x64"
+    FILE_PATTERN="uptime-monitor-linux-amd64"
     ;;
   "linux/arm64"|"linux/aarch64")
-    FILE_PATTERN="erp-linux-arm64-arm64"  # ⚠️ 请确认你的实际文件名
+    FILE_PATTERN="uptime-monitor-linux-arm64"  # ⚠️ 请确认你的实际文件名
     ;;
   *)
     echo "Unsupported platform: $TARGETPLATFORM"
@@ -53,13 +53,15 @@ if [ ! -f "$FILE_PATTERN" ]; then
 fi
 
 echo "Found binary: $FILE_PATTERN"
-cp "$FILE_PATTERN" erp-binary
-chmod +x erp-binary
+cp "$FILE_PATTERN" uptime-monitor
+chmod +x uptime-monitor
 echo "Successfully prepared erp-binary for $TARGETPLATFORM"
 EOF
 
 # 声明服务端口
-EXPOSE 8080
+VOLUME ["/data"]
+EXPOSE 3001
 
 # 启动命令
-CMD ["./erp-binary"]
+ENTRYPOINT ["/uptime-monitor"]
+CMD ["-addr", ":3001", "-data", "/data/uptime.db"]
