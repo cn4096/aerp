@@ -66,7 +66,7 @@
  docker run -itd \
   --name uptime-monitor \
   --restart=always \
-  -p 13001:3001 \
+  -p 3001:3001 \
   -v $(pwd)/uptime-monitor:/data \
   ghcr.io/cn4096/uptime-monitor:latest
   
