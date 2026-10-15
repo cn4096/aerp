@@ -63,5 +63,5 @@ VOLUME ["/data"]
 EXPOSE 3001
 
 # 启动命令
-ENTRYPOINT ["/uptime-monitor"]
+ENTRYPOINT ["./uptime-monitor"]
 CMD ["-addr", ":3001", "-data", "/data/uptime.db"]
