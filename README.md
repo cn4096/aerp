@@ -1,6 +1,7 @@
 # Uptime Monitor
 
 一个用 Go 编写的服务可用性监控程序（类似 Uptime Kuma 的精简版）。纯 Go、**cgo=0**，单文件二进制，内置网页管理界面，数据存 SQLite。
+<img width="1535" height="1100" alt="image" src="https://github.com/user-attachments/assets/60a1715c-f8ec-41d5-8f66-a1b8b3ca9041" />
 
 ## 特性
 
