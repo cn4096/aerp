@@ -30,17 +30,34 @@
 ## 快速开始
 
 ```bash
-# 1. 拉取依赖（首次）
-go mod download
-
-# 2. 编译（纯 Go，无 cgo）
-CGO_ENABLED=0 go build -o uptime-monitor .
-
-# 3. 运行
-./uptime-monitor -addr :3001 -data uptime.db
+./uptime-monitor-linux-arm64
 ```
 
 打开 <http://localhost:3001> 即可。默认不启用登录，可直接使用；在「设置」里设置管理口令后访问需登录。
+
+## uptime Docker启动
+
++ 测试：`docker run --rm --network host ghcr.io/cn4096/uptime-monitor:latest`   `端口`：3001
+
++ 数据保存到本地并运行：
+  
+```
+ ## 删除旧的容器，更新镜像
+ docker stop uptime-monitor ; docker rm uptime-monitor
+
+ ## 下载/更新镜像
+ docker pull ghcr.io/cn4096/uptime-monitor:latest
+
+ ## 数据保存在当前目录/data 访问端口:3001
+ docker run -itd \
+  --name uptime-monitor \
+  --restart=always \
+  -p 3001:3001 \
+  -v $(pwd)/uptime-monitor:/data \
+  ghcr.io/cn4096/uptime-monitor:latest
+  
+```
+
 
 ### 命令行参数
 
