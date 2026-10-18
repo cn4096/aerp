@@ -71,3 +71,27 @@
   ghcr.io/cn4096/uptime-monitor:latest
   
 ```
+### 命令行参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-addr` | 空 | 监听地址；留空则用「设置 → 服务端口」上次保存的值（都没有时为 `:3001`） |
+| `-data` | `uptime.db` | SQLite 数据库文件 |
+| `-password` | 空 | 启动时设置/重置管理口令；留空不启用登录 |
+| `-version` | | 显示版本后退出 |
+
+### uptime 重置管理口令（命令行）
+
+忘记口令或无法登录时，可在服务所在机器上直接修改数据库，不需要先进网页：
+
+```bash
+./uptime-monitor pass 'new-password-123'      # 指定新口令（至少 8 位）
+./uptime-monitor -data /data/uptime.db pass   # 不填则随机生成 12 位并显示
+```
+
+改完需重启服务才会生效（运行中的进程使用的是内存里的旧口令）。Docker 部署：
+
+```bash
+docker exec uptime-monitor /uptime-monitor -data /data/uptime.db pass
+```
+
